@@ -1,0 +1,253 @@
+---
+title: "Le masque dans les données covid"
+subtitle: "Annotations du sentiment"
+author: "CB"
+date: "12 avril 2020"
+output: html_document
+---
+![]()
+
+# Objet d'étude
+
+* des acteurs
+* des actions : porté par les verbes
+* un argument
+* le contexte
+
+# Les outils de l'analyse
+
+Le but de l'exercice est de mesurer le sentiment dans la période covid19 au travers des twits  qui signale clairement l'intention de donner son sentiment, son humeur, sa pensée, son expérience. 
+ 
+
+```{r setup, include=FALSE, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE, cache=TRUE, message=FALSE,warning=FALSE)
+library(readr)
+library(tidyverse) #l'environnement de base : données et visus
+library(reshape2)
+library(gridExtra) #associer des ggplot
+library(ggrepel) #pour une belle labelisation des xy
+library(igraph) #pour l'analyse de réseau
+library(scales) #pour les échelles de temps et de date
+library(syuzhet)     # ncr      
+library(tm)
+library(quanteda) #with quanteda
+library(kableExtra)
+library(stringi)
+library(scales) #pour les échelles de temps et de date
+library(ineq)
+library(gglorenz)
+library(ggridges)
+library(rtweet)
+library(RcppRoll) #pour des moyennes glissantes
+```
+
+
+On lit le fichier réhydraté par michel calciu. On effectue quelques recodae pratique pour la suite et on filtre les tweets originaux qu'on va annoter.On utilisera aussi ses procédures de parallélisation".
+
+
+```{r capt, include=TRUE}
+
+covid <- read_delim("coronavirus-tweet-id-2020-1-5fr.csv", "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  select( id, parsed_created_at,user_screen_name, text,tweet_type, media, urls, tweet_type, favorite_count, retweet_count, possibly_sensitive, user_created_at,user_description, user_followers_count, user_friends_count, user_verified) %>%
+  mutate(media=ifelse(is.na(media),"no", "yes" ), urls=ifelse(is.na(urls),"no", "yes" ))
+
+covid$tweet_typ<-"NA"
+covid$tweet_typ[covid$tweet_type=="original"]<-"original"
+covid$tweet_typ[covid$tweet_type=="quote"]<-"quote"
+covid$tweet_typ[covid$tweet_type=="retweet"]<-"retweet"
+covid$tweet_typ[covid$tweet_type=="reply"]<-"reply"
+covid<-covid %>% filter(tweet_typ != "NA")
+
+table(as.factor(covid$media) )
+table(as.factor(covid$urls) )
+table(covid$media,covid$urls)
+table(covid$tweet_typ)
+
+ggplot(covid, aes(x=tweet_typ))+
+  geom_bar(fill="firebrick")+
+  theme_minimal()+
+  labs(title=" Types de tweets", x="Types",y="Frequencies", caption="data covid19 rehydraté")
+
+df<-covid %>% filter(tweet_typ !="retweet")
+saveRDS(df,file="df.rds")
+
+```
+
+# L'évolution quantitative des tweets - corpus total
+
+On retrace ici la production des tweets, rt et comment d"heure en heure ce qui permet de capter les variations quotidiennes. On notera qu'en journée l'échantillon représente plusieurs milliers d'observations à l'heure ce qui assure une grande sensibilité des mesures. 
+
+On utilise [ts_plot](https://cran.r-project.org/web/packages/TSstudio/vignettes/Plotting_Time_Series.html)
+
+Un rapport de 1 à 10 entre les tweets et retweets doit être observés. Les réponses et citations  aux tweets sont moins fréquentes que ceux-ci.On les conserve car sont des éléments discursifs 
+
+```{r desc1, fig.width=10}
+## plot time series of tweets
+col<-c("firebrick3","deepskyblue2","deepskyblue4","gold3")
+covid %>%
+  dplyr::group_by(tweet_typ) %>%
+ts_plot( "1 day", lwd=1.1) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")) +
+  ggplot2::labs(
+    x = NULL, y = NULL,
+    title = "Fréquence des posts twitters sur #confinementjour",
+    subtitle = "Nombre de tweets par jour",
+    caption = "\nSource: Data COVID 19 rehydrated")+ 
+  scale_x_datetime(date_breaks = "1 week", labels = scales::label_date_short())+
+  scale_y_log10()+
+  theme_minimal()+
+  labs(title=" Types de tweets", x="Types",y="Frequences journalières", caption="data : Banda et al 2020 ")+scale_color_manual(values=col)
+```
+
+# L'évolution quantitative des tweets - corpus réduit
+
+On se concentre sur les tweets originaux.On reviendra sur les tweets dérivés. On donne ici les évolution selon deux critères ; un media est-il associé? Un lien est-il associé. En effet la limite de l'analyse textuelle est non seulement de limiter son analyse à une portion de la communication mais en plus de faire de ces associations des éléments de son discours. 
+Examinons la fréquences les tweets acompagnés par une url, donc un document , une preuve, un fait réel ou imaginaire.
+
+
+```{r Senti01, include=TRUE, fig.width=10}
+df<-df %>% mutate(infradat=ifelse(urls=="yes" & media=="yes", "texte, media et URL", ifelse(urls=="yes" & media== "no","text + urls", ifelse(urls=="no" & media=="yes", "text+media","text only"))))
+col<-c("firebrick3","deepskyblue2","deepskyblue4","gold3")
+
+## plot time series of tweets
+df %>%
+  dplyr::group_by(infradat) %>%
+  ts_plot( "1 day",lwd=1.2)+
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")) +
+  ggplot2::labs(x = NULL, y = NULL,
+    title = "Fréquence des posts covid19",
+    subtitle = "Nombre de tweets par jour",
+    caption = "\n data covid19 réhydraté par M. Calciu")+ 
+  scale_x_datetime(date_breaks = "1 week", labels = scales::label_date_short())+
+  theme_minimal()+scale_color_manual(values=col)
+
+```
+
+
+# Annotations
+
+L'analyse du sentiment peut se faire avec plusieurs outils, on en retient pour l'instant trois, auxquels d'autres devraient être ajoutés (emoji, )
+
+ * le NCR avec le package [syuzhet](https://cran.r-project.org/web/packages/syuzhet/vignettes/syuzhet-vignette.html)  On complète avec les émotions. 
+ * le #Liwc via quanteda et le dictionnaire en français.
+ * le lsdfr
+
+
+
+## Méthode NRC
+
+On utilise le package [`syuzhet`]'(https://cran.r-project.org/web/packages/syuzhet/vignettes/syuzhet-vignette.html). La procédure est simple. On enrichit le fichier de données df de ces nouvelles annotations
+
+https://cran.r-project.org/web/packages/syuzhet/vignettes/syuzhet-vignette.html
+
+Il donne un comptage des termes positifs et négatifs, mais aussi une gamme de 8 émotions. 
+
+```{r Senti01b, eval = TRUE}
+#require(syuzhet)            
+#prend bcp de temps 
+#paramétres
+phrase<-as.character(df$text)
+
+#extraction
+my_text_values_french1<- get_nrc_sentiment(phrase, language="french")
+
+#ajout de la colonne sentiment au tableau de données général:
+sent<-as.data.frame(my_text_values_french1)
+#extrait du fichier
+kable(head(sent,5))
+
+#ajout
+df<-cbind(df,sent)
+
+#on sauvegarde pour réemploi ultérieur
+write_rds(df,"df_nrc.rds")
+library(parallel)
+
+cl <- makeCluster(3)
+clusterExport(cl = cl, c("get_sentiment", "get_sent_values", "get_nrc_sentiment", "get_nrc_values", "parLapply"))
+df_par <- get_sentiment(phrase, cl=cl)
+df_nrc_par <- get_sentiment(phrase, method='nrc', cl=cl)
+stopCluster(cl)
+
+
+```
+
+Il y a une solution de parallélisation
+  
+c1 <- detectCores() # get the number of cores available
+clusterExport(cl = cl, c("get_nrc_sentiment", "parLapply"))
+bovary_nrc_par <- get_nrc_sentiment(phrase, language="french", cl=cl)
+stopCluster(cl)
+
+Une amélioration possible est la lemmatisation préalable du corpus qui devrait présenter un taux de reconnaissance plus élevé. C'est à tester de manière systématique
+
+
+## Methode liwc
+
+le LIWC dont il existe [deux versions 2007 et 2015](https://liwc.wpengine.com/compare-dictionaries/) permet d’obtenir d’autres indicateurs du sentiment, même s'il propose son propre calcul de positivité et de negativité qu'on va explité ne serait-ce que pour étblir la convergence avec l'indicateur NRC.
+
+Une partie des 80 indicateurs proposés est relatif à des dimensions topicales dont plusieurs groupes vont retenir notre attention dans la mesure où ils décrivent une partie de l’expérience relatée dans les commentaires. On retrouvera ici les [principales variables](https://www.kovcomp.co.uk/wordstat/LIWC.html) traduction en français voir ref
+
+La procédure pour extraire ces notions est fort simple, analogue à la précédente : on installe le dictionnaire LIWC et on utilise quanteda pour executer l'opération (`liwcalike`)
+
+```{r liwc01, eval = TRUE}
+# the devtools package needs to be installed for this to work
+#devtools::install_github("kbenoit/quanteda.dictionaries")
+
+library("quanteda.dictionaries")
+dict_liwc_french <- dictionary(file = "FrenchLIWCDictionary.dic",
+                             format = "LIWC")
+test<-liwcalike(df$text,dictionary = dict_liwc_french)
+kable(head(test,5))
+
+df<-cbind(df,test)
+
+write_rds(df,"df_nrcliwc.rds")
+
+```
+
+Maintenant on analyse les données, plus de 80 colonnes se sont ajoutées à notre fichier.
+
+## Méthode lsd
+
+Lexicoder en français est du à @duval_analyse_2016. [voir aussi](https://www.poltext.org/fr/donnees-et-analyses/lexicoder). On utilise la version adaptée pour quanteda.
+
+```{r sent13,  eval = FALSE}
+dictfile <- tempfile()
+download.file("http://dimension.usherbrooke.ca/voute/frlsd.zip", dictfile, mode = "wb")
+unzip(dictfile, exdir = (td <- tempdir()))
+dic_ton <- dictionary(file = paste(td, "frlsd.cat", sep = "/"))
+df_senti<-df_nrc$text %>% tokens(what = "word", remove_numbers = TRUE, 
+                              remove_punct=TRUE, remove_symbols = TRUE,
+                              remove_separators = TRUE, remove_twitter = TRUE,
+                              remove_hyphens = FALSE, remove_url = TRUE, 
+                              ngrams = 1L)
+senti<-tokens_lookup(df_senti, dictionary = dic_ton, exclusive = FALSE)
+#head(senti,2)
+#Application du dictionnaire des sentiments: obtient l'occurence des termes positifs et des termes négatifs par commentaire
+analyseSentiments <- dfm(df_senti, dictionary = dic_ton)
+#Transformation en un data.frame avec transformation du nom des variables
+
+dfBaseSpecifique=data.frame(analyseSentiments,nb=ntoken(df_senti), id=rownames(df))
+dfBaseSpecifique<-dfBaseSpecifique %>% rename(lsdfr_positive=POSITIVE, lsdfr_negative=NEGATIVE)
+df_nrcliwclsd<-cbind(df_nrcliwc,dfBaseSpecifique)
+write_rds(df_nrcliwclsd,"df_nrcliwclsd.rds")
+
+```
+
+```{r sent13,  eval = TRUE}
+df_nrcliwc<-readRDS("df_nrcliwc.rds")
+M<-subset(df_nrcliwc, select=c(anger, anticipation,disgust, fear, joy, sadness, surprise,trust, negative, positive,émopos,émonég))
+M <- cor(M)
+library(corrplot)
+corrplot.mixed(M, order="hclust")
+
+```
+
+
+## le traitement des emojis.
+
+ c'est une question essentielle mais résolue par [Sophie Balech](https://benaventc.github.io/BarometreConfinement/confinement02_emojis.html) .....
+
+

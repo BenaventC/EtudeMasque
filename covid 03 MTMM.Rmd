@@ -1,0 +1,366 @@
+---
+title: "La validité des indicateurs de sentiment - le cas des données covid"
+subtitle: "Annotations du sentiment"
+author: "CB"
+date: "12 août 2020"
+output: html_document
+---
+
+# Packages utilisés
+
+```{r setup, include=FALSE, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE, cache=TRUE, message=FALSE,warning=FALSE)
+library(tidyverse) #l'environnement de base : données et visus
+library(reshape2)
+library(gridExtra) #associer des ggplot
+library(ggrepel) #pour une belle labelisation des xy
+library(igraph) #pour l'analyse de réseau
+library(scales) #pour les échelles de temps et de date
+library(syuzhet)     # ncr      
+library(tm)
+library(quanteda) #with quanteda
+library(kableExtra)
+library(stringi)
+library(scales) #pour les échelles de temps et de date
+library(ineq)
+library(gglorenz)
+library(ggridges)
+library(rtweet)
+library(RcppRoll)
+library(sjPlot)
+library(pscl)
+library(stargazer)
+```
+
+
+# les données
+
+```{r file}
+df<-readRDS("df_nrc.rds")
+
+```
+
+
+
+# Segmenter le corpus selon l'activité des twittos originaux
+
+Ultérieurement, il sera intéressant de comparer les deux sous corpus. Le premier reflète la production primaire et originale, de ceux assez engagés pour faire l'effort de produire un contenu. Le second reflète la propagation des idées diffusées dans par le premier et les préférences des utilisateurs moins engagés, les "transmetteurs". Ils ont le pouvoir de propager certains contenus audelà de leurs audiences immédiates et peuvent ainsi déformer la distribution des contenus, comme l'écho peut filtrer certains sons.
+
+
+```{r prod}
+
+#on calcule le nombre de tweets par twittos
+twittos<-df %>% 
+  mutate(n=1) %>% 
+  group_by(user_screen_name) %>% summarise(nb_tweetso = sum(n))
+
+col =c("deepskyblue4","chartreuse4","gold3","firebrick3")
+
+twittos<-twittos %>% mutate(Twittos=ifelse(nb_tweetso==1,"Ponctuels", 
+                                 ifelse(nb_tweetso>1 & nb_tweetso<7, "Récidivistes", 
+                                 ifelse(nb_tweetso>6 & nb_tweetso<50,"Fidèles","Superposteurs"))))
+
+twittos$Twittos<- factor(twittos$Twittos,ordered=TRUE,levels=c("Ponctuels","Récidivistes","Fidèles","Superposteurs"))
+
+
+df <-df %>%left_join(twittos,by="user_screen_name")%>%mutate(n_tweets=1)                                 
+
+df_user<-df %>% mutate(n_word=lengths(strsplit(text, "\\W+")) ,
+                        nrc_positif=positive/n_word, 
+                        nrc_negatif =negative/n_word,
+                        nrc_neutre =(n_word-positive-negative)/n_word,
+                        liwc_positif=émopos/100,
+                        liwc_negatif=émonég/100,
+                        liwc_neutre =1-liwc_positif-liwc_negatif/n_word,
+                       lsdfr_positif=lsdfr_positive/n_word,
+                       lsdfr_negatif=lsdfr_negative/n_word,
+                       lsdfr_neutre =1-lsdfr_positif-lsdfr_negatif,
+                        nrc_valence=nrc_positif-nrc_negatif,
+                        liwc_valence=liwc_positif-liwc_negatif,
+                     lsdfr_valence=lsdfr_positif-lsdfr_negatif,
+                        nrc_expressivity=nrc_positif+nrc_negatif,
+                    liwc_expressivity=liwc_positif+liwc_negatif,
+                     lsdfr_expressivity=lsdfr_positif+lsdfr_negatif) %>% 
+  filter(nrc_positif<1.001)%>% 
+  filter(nrc_negatif<1.001)%>% 
+    filter(nrc_neutre >-0.001))
+
+
+df_user$day<-as.numeric(format(df_user$parsed_created_at, "%d")) # jour
+df_user$month<-as.numeric(format(df_user$parsed_created_at, "%m")) # mois
+df_user$hour<-as.numeric(format(df_user$parsed_created_at, "%H")) # heure
+df_user$Year<-2020 # heure
+
+ggplot(df_user,aes(x=n_word,y=lsdfr_positif))+geom_point()+geom_smooth(method="lm")
+ggplot(df_user,aes(x=n_word,y=lsdfr_negatif))+geom_point()+geom_smooth(method="lm")
+ggplot(df_user,aes(x=n_word,y=lsdfr_neutre))+geom_point()+geom_smooth()
+
+#ggplot(df_user,aes(x=nrc_neutre,y=nrc_negatif))+ geom_point()+ geom_density2d()+theme_minimal()
+
+```
+
+# Analyse du sentiment - niveau des textes
+
+## Corrélations des indicateurs bruts
+
+```{r sent13,  eval = TRUE}
+M<-subset(df_user, select=c( positive, émopos,lsdfr_positive, negative,émonég,lsdfr_negative))
+M <- cor(M)
+library(corrplot)
+corrplot.mixed(M)
+M<-subset(df_user, select=c(nrc_positif, liwc_positif,lsdfr_positif,nrc_negatif,liwc_negatif,lsdfr_negatif, nrc_neutre,liwc_neutre,lsdfr_neutre))
+M <- cor(M)
+corrplot.mixed(M, tl.cex = 0.6)
+
+
+```
+
+## Corrélation des indicateurs
+
+On retient le ratio (Sentiment/Nombre de mots) pour les analyses en gardant à l'esprit qu'une conception bi fatorielle est envisageable
+
+
+
+diagramme ternaire
+permet de mieux se rendre compte quela bande inférieure est vide : il n'y quasi aucun tweet à 100% d'expressif , la grande majorité est audessus de 0.5, donc moins expressifs .
+
+
+
+
+
+#analyse de convergence des indicateurs
+
+Un problème est celui de la fiabilité et de la validité des indicateurs de sentiments. Si on en dispose de pplusiers on peut s'intérooger sur leur convergence : sont-ils suffisemment corrélés? Décrivent-ils bien ce qu'ils doivent décrire? C'est cette étude que nous allons entreprendre en nous inspirant du cadre méthodologique de la constructions des échelles. 
+
+## fa
+## alphe
+## mtmm
+
+
+# MTMM
+
+
+On utilise les ressources de lavaan https://lavaan.ugent.be/tutorial/groups.html
+
+Dans ce modèle chaque mesure d'un trait revient au modèle xik = li*Ti+Mk autrement dit l'effet de méthode est un 
+
+La spécification du modèle 
+ 
+ * 
+
+
+```{r sem1}
+df_sem<- df_user%>%filter(n_word>5) %>% select(nrc_positif,nrc_negatif,liwc_positif, liwc_negatif,lsdfr_positif,lsdfr_negatif, Twittos,month)
+
+df_sem<-na.omit(df_sem)
+
+ #cor(df_sem)
+library(lavaan)
+
+
+model<-'
+#traits
+Positif =~1* nrc_positif+liwc_positif+lsdfr_positif
+Negatif =~ 1*nrc_negatif+liwc_negatif+lsdfr_negatif
+Positif~~Negatif
+Positif~~1*Positif
+Negatif~~1*Negatif
+#methods
+
+NRC   =~1*nrc_positif+1*nrc_negatif
+LIWC  =~1*liwc_positif+1*liwc_negatif
+LSDFR =~1*lsdfr_positif+1*lsdfr_negatif
+
+NRC ~~ 1*NRC
+LIWC ~~ 1*LIWC
+LSDFR ~~ 1*LSDFR
+'
+```
+
+La méthode d'estimation.
+
+```{r sem2}
+
+fit <- sem(model, df_sem, estimator="GLS")
+summary(fit,standardized = TRUE)
+mi <- modindices(fit)
+mi[mi$op == "=~",]
+```
+
+```{r sem3}
+
+#parameterEstimates(fit)
+fitMeasures(fit, c("cfi","rmsea", "chisq","npar","aic","bic","srmr"))
+std_ts <- standardizedsolution(fit) %>% filter(op == "=~") %>% select(1:4)
+std_ts
+```
+```{r sem4}
+
+
+##
+library(semPlot)
+groups <- list(group1 = 1:6,
+               group2 = 7:8,
+               group3 = 9:11)
+
+n = matrix(nrow = 6, ncol = 3)
+n[,1 ] = c(0, 7, 0, 0, 8, 0)
+n[,2 ] = c(1, 2, 3, 4, 5, 6)
+n[,3 ] = c(9, 0, 10,0, 11, 0)
+n
+
+semPaths(fit, title = TRUE,layout=n,
+         groups=groups, color = c("#fff8dc", "#58B5BC", "#F5651C"),
+         curvePivot = TRUE,
+         style= "lisrel",
+         what = "std",
+         rotation = 1,
+         optimizeLatRes = TRUE,
+         intercepts = TRUE,residual =FALSE,
+         edge.label.cex = 0.95,
+         exoVar=FALSE,
+         sizeMan=5,
+         sizeLat=6,
+         nCharNodes=6,
+         residuals=FALSE,
+         fixedStyle = 2,
+         freeStyle=1,fade=FALSE)
+```
+# 
+
+on teste la stabilité du modèle à travers le temps sur des unités d'un mois, mais aussi à travers les populations en reprenant la segmentation en fonction de la contribution des twittos.
+
+```{r sem5}
+
+# on teste la stabilité du modèle à travers le temps sur des unités d'un mois, mais aussi à travers les populations en reprenant la segmentation en fonction de la contribution des twittos.
+
+fit <- sem(model, df_sem)
+fit_g <- sem(model, df_sem, group="Twittos")
+fit_t <- sem(model, df_sem, group="month")
+
+summary(fit,standardized = TRUE)
+#parameterEstimates(fit)
+fitMeasures(fit, c("cfi","rmsea", "chisq","npar","aic","bic"))
+fitMeasures(fit_g, c("cfi","rmsea", "chisq","npar","aic","bic"))
+fitMeasures(fit_t, c("cfi","rmsea", "chisq","npar","aic","bic"))
+
+# on teste la stabilité du modèle à travers le temps sur des unités d'un mois, mais aussi à travers les populations en reprenant la segmentation en fonction de la contribution des twittos.
+```
+
+## Mesures d'invariance
+
+La question posée est de savoir s'il est nécessaire de laisser certains jeux de paramètres libres pour chaque groupe du modèle multi-group, ou qu'on peux imposer la même structures, autrements dit les mêmes valeurs de paramètres pour chacun des groupes. C'est ce qui est étudié par les méthodes d'invariance structurelles qui dans les procédures distinguent 4 grand niveaux :
+
+- l'invariance configurale ! seules les relations entre les concepts sont considérées comme égales à traversles groupes : la sructure se maintient
+- l'invariance métrique qui suppose que les loadings des instruments de mesure au concept soient aussi égaux d'un groupe à l'autre
+- l'invariance scalaire :The ability to justify mean comparisons across time or across
+groups is established by attaining scalar or strong invariance. Scalar invariance builds
+upon metric invariance by requiring that the item intercepts also be equivalent across
+administrations. Item intercepts are considered the origin or starting value of the scale
+that your factor is based on. Thus, participants who have the same value on the latent
+construct should have equal values on the items the construct is based.
+- l'invariance sctrict qui suppose les mêmes variances des facteurs et des mêmes variance des items
+
+http://comm.eval.org/HigherLogic/System/DownloadDocumentFile.ashx?DocumentFileKey=63758fed-a490-43f2-8862-2de0217a08b8
+
+
+```{r sem6}
+
+library(semTools)
+measurementInvariance(model=model, data = df_sem, group = "Twittos")
+measurementInvariance(model=model, data = df_sem, group = "month")
+
+```
+
+# Une approche avec recodage pour données de proportions
+
+mais probleme de matrice non positice pour garder les trois traits
+
+
+```{r sem1, fig.width=10}
+df_sem<- df_user%>%filter(n_word>5) %>% select(nrc_positif,nrc_negatif,nrc_neutre,liwc_positif, liwc_negatif, liwc_neutre,lsdfr_positif,lsdfr_negatif,lsdfr_neutre, Twittos,month)
+df_sem<-na.omit(df_sem)
+
+clr_nrc <- df_sem  %>% select(nrc_positif,nrc_negatif,nrc_neutre)
+clr_liwc <- df_sem  %>% select(liwc_positif, liwc_negatif, liwc_neutre)
+clr_lsdfr <- df_sem  %>% select(lsdfr_positif,lsdfr_negatif,lsdfr_neutre)
+
+library(compositions)
+
+clr_nrc <-as.data.frame(clr(clr_nrc))
+clr_liwc <-as.data.frame(clr(clr_liwc))
+clr_lsdfr <-as.data.frame(clr(clr_lsdfr))
+df_semT<-cbind(clr_nrc,clr_liwc,clr_lsdfr)
+corrplot(cor(clr_liwc))
+library(lavaan)
+
+
+model<-'
+#traits
+Positif =~1*nrc_positif+liwc_positif+lsdfr_positif
+Negatif =~ 1*nrc_negatif+liwc_negatif+lsdfr_negatif
+Positif~~Negatif
+Positif~~1*Positif
+Negatif~~1*Negatif
+#methods
+
+NRC   =~1*nrc_positif+1*nrc_negatif
+LIWC  =~1*liwc_positif+1*liwc_negatif
+LSDFR =~1*lsdfr_positif+1*lsdfr_negatif
+
+NRC ~~ 0.1*NRC
+LIWC ~~ 0.1*LIWC
+LSDFR ~~ 0.1*LSDFR
+
+'
+fit <- sem(model, df_semT, estimator="GLS")
+summary(fit,standardized = TRUE)
+
+##
+library(semPlot)
+groups <- list(group1 = 1:6,
+               group2 = 7:8,
+               group3 = 9:11)
+
+n = matrix(nrow = 2, ncol = 8)
+n[1, ] = c(0, 7, 8, 0, 9, 10, 11, 0)
+n[2, ] = c(0, 1, 2, 3, 4, 5, 6, 0)
+#n[,3 ] = c(9, 0, 10,0, 11, 0)
+n
+
+semPaths(fit, title = TRUE,layout=n,
+         groups=groups, color = c("#fff8dc", "#58B5BC", "#F5651C"),
+         curvePivot = TRUE,
+         style= "lisrel",
+         what = "std",
+         rotation = 2,reorder=FALSE,
+         optimizeLatRes = TRUE,
+         intercepts = FALSE,residual =TRUE,
+         edge.label.cex = 0.75,
+         exoVar=TRUE,
+         sizeMan=5,
+         sizeLat=6,
+         nCharNodes=6,
+         fixedStyle =  c("black",1) ,
+         freeStyle= c("blue",1) ,
+         fade=FALSE)
+```
+
+ajusteme,t est presque parfait pourtant de nombre contraintes sont imposées. Surement sur identifié. 
+```{r sem2}
+
+fit <- sem(model, df_semT, estimator="GLS")
+#summary(fit,standardized = TRUE)
+fitMeasures(fit, c("cfi","rmsea", "chisq","npar","aic","bic","srmr"))
+fit_g <- sem(model, df_semT, group="Twittos")
+fit_t <- sem(model, df_semT, group="month") #correction fichier à apporter
+
+summary(fit,standardized = TRUE)
+#parameterEstimates(fit)
+fitMeasures(fit, c("cfi","rmsea", "chisq","npar","aic","bic"))
+fitMeasures(fit_g, c("cfi","rmsea", "chisq","npar","aic","bic"))
+fitMeasures(fit_t, c("cfi","rmsea", "chisq","npar","aic","bic"))
+
+# on teste la stabilité du modèle à travers le temps sur des unités d'un mois, mais aussi à travers les populations en reprenant la segmentation en fonction de la contribution des twittos.
+
+```

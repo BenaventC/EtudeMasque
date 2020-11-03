@@ -1,0 +1,556 @@
+---
+title: "La dynamique du réseau des lemmes les plus fréquents"
+author: "Julien Monnot"
+date: "25 avril 2020"
+output:
+  html_document: default
+---
+![@richard_tassart](masccatdelivery.jpg)
+<style type="text/css">
+body, td {
+   font-size: 12px;
+}
+code.r{
+  font-size: 10px;
+}
+h1{
+  font-size: 18px;
+}
+h2{
+  font-size: 16px;
+}
+h3{
+  font-size: 14px;
+}
+pre {
+  font-size: 11px
+}
+</style>
+
+
+script de l'article M&DS, #culture data ["le masque au centre"](https://docs.google.com/document/d/1j-OZ7PYLBsH9SWsURhwAadcfySUzacuOVo64oMn71bw/edit?usp=sharing) à venir en mai 2020.
+
+
+```{r setup,fig.width=9, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE, cache=TRUE, message=FALSE,warning=FALSE)
+library(tidyverse)
+library(tidytext)
+library(cleanNLP)
+library(gridExtra)
+library(RcppRoll)
+library(lubridate)
+library(widyr)
+```
+# Objectif du script
+
+saisir la dynamique du masque pour l'article marché et innovation
+
+
+# lecture et préparation des données
+
+
+## lecture des données et recodage
+
+en particulier le jour qui débute en janvier.
+
+```{r data1}
+
+df<-readRDS(file = "df_nrc.rds")
+```
+
+la distribution des tweets par jour suit l'allure suivante :
+
+Le débit de d'ordre de 4 000 tweets par jour.
+On pourrait calculer le degré d'exposition.
+
+( améliorer l'échelle de temps)
+
+```{r data2, fig.width=9}
+df$day<-as.numeric(format(df$parsed_created_at, "%d")) # jour
+df$month<-as.numeric(format(df$parsed_created_at, "%m")) # mois
+df$hour<-as.numeric(format(df$parsed_created_at, "%H")) # heure
+df$year<-2020 # heure
+df$date<-paste0("2020","-",df$month,"-",df$day)
+df$date2 <- as.POSIXct(strptime(df$date, "%Y-%m-%d"))
+df$doc_id<-as.integer(rownames(df))
+#à vérifier
+df<-df %>% mutate(Jour=ifelse(month==1,day,ifelse(month==2,day+31,ifelse(month==3,day+59,ifelse(month==4, day+90,ifelse(month==5,120+day,151+day))))))
+df$Jour<-as.factor(df$Jour)
+ggplot(df,aes(x=date2))+
+  geom_line(stat="count",color="brown", size=1.2)+ 
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme_minimal()+labs(title="Nombre de tweets par jour",y="nombre",x=NULL)
+
+```
+
+On annote les upos, dans le but de lemmatiser, ce qui va réduire l'étendue du vocabulaire et de filtrer le vocabulaire en fonction des part of speech : on se concentre sur les noms commun, les verbes et les adjectifs. 
+
+
+```{r annotation, fig.width=9, message=FALSE}
+df$text<- gsub('\\p{So}|\\p{Cn}', '', df$text, perl = TRUE)
+
+df$text<-gsub("?(f|ht)tp(s?)\\S+", "xxxxx", df$text)
+df$text<-gsub("(@[A-Za-z0-9]+)", "xxxxx", df$text)
+df$text<-gsub("#", "", df$text)
+df$ntc<-nchar(df$text)
+df$text[df$ntc==0]<-"xxxxx"
+
+df$text<-tolower(df$text)
+#df_sample<- sample_n(df,1000)
+text<-paste0(df$text)
+
+#on nettoie le text
+
+#library(reticulate)
+#py_discover_config(required_module="cleannlp")
+#Sys.setenv(RETICULATE_PYTHON = "C:/Users/33623/anaconda3")
+
+#on annote
+#cnlp_init_spacy('fr_core_news_sm')spacy.load('fr_core_news_sm')
+#cnlp_download_corenlp("fr")
+#cnlp_init_corenlp("fr")
+# avant c'est à tester commence l'annotation veritable
+cnlp_init_udpipe(model_name = "french")
+#obj <- cnlp_annotate(text)
+#saveRDS(obj,"objCovid.rds")
+obj<-readRDS(file="objCovid.rds")
+
+```
+## premiers éléments
+
+Examinons les tokens/mots obtenus de manière brut : il peuvent être de la ponctuation,  des acronymes, etc.
+
+
+```{r lemme01, echo = FALSE}
+#library(cleanNLP)
+
+token<-obj$token %>%
+  group_by(doc_id) %>%
+  summarize(length = n())
+
+foo<-token %>%filter(length>1)
+
+m_token=median(as.numeric(token$length))
+
+g0<-ggplot(foo,aes(length))+
+  geom_histogram(binwidth = 1,  fill="firebrick3")+geom_vline(xintercept = m_token, linetype="solid", color = "royalblue3", size=1.2)+
+  theme_minimal()+
+  labs(title = "Distribution des longueurs de texte ( tokens)",subtitle=paste0("médiane : ",m_token), caption = "data covid19",x="nombre de mots par tweet",y="Effectifs")+xlim(0,70)
+g0
+```
+
+On peut décomposer par catégorie morpho-syntaxiques :
+
+```{r lemme01, echo = FALSE, fig.height=6, fig.width=9}
+lemmes<-obj$token %>%
+  group_by(upos) %>%
+  summarize(count = n()) %>%
+  top_n(n = 50, count) %>%
+  arrange(desc(count))
+
+g1<-ggplot(lemmes,aes(x=reorder(upos,count),y=count))+
+  geom_bar(stat="identity",fill="darkgreen")+coord_flip()+theme(text = element_text(size=9))+
+  theme_minimal()+  labs(title = "Noms communs les plus fréquents",caption = "data covid19",x="",y="Effectifs")
+g1
+
+lemmes<-obj$token %>%
+  filter(upos == "NOUN") %>% mutate(n=1) %>% 
+  group_by(lemma) %>% summarise(n=sum(n)) %>% 
+  filter(lemma != "xxxxx") %>% filter( lemma != "xxxx") %>% filter(n>3500)
+
+
+g2<-ggplot(lemmes,aes(x=reorder(lemma,n),y=n))+
+  geom_point(stat="identity", aes(color=ifelse(lemma=="masque","blue", "red")), size=2.5,show.legend = FALSE)+
+  coord_flip()+
+  theme(text = element_text(size=9))+
+  theme_minimal()+  
+  labs(title = "Noms communs les plus fréquents", subtitle=" sans lemmatisation",caption = "",x="",y="Effectifs (log10)")+
+  scale_y_continuous(trans="log10", label=comma)+scale_color_brewer(palette="Set1")
+g2
+ggsave("frequencenoun1.jpg",plot=last_plot())
+
+library(cleanNLP)
+```
+
+On extrait les relation syntaxique relative au masque. 
+3 relation sont isolée :
+Acl
+nmod
+appos
+
+
+on lira https://arxiv.org/ftp/arxiv/papers/1703/1703.09570.pdf pour la philosophie de la langue et ce passage du sujet au verbe qui dit autant de l'esprit de la langue, que de la nature de nos intentions. Si dans l'occident classique dont la france est un berceau la pensée linguistique s'est tourné vers le Sujet, l'alternative efficace est venue des langue slaves, pour lesquelles des chercheurs ont privilégié le commandement de la phrase par le verbe. C'est la solution des Universal dependencies dont les normes sont disponibles ici https://universaldependencies.org/.
+
+Sur un plan philosophique on sera intéressé par ce renversement empirique qui soutient d'une certaine manière la théorie des actes de langages. ET d'abord dut le verbe, la langue se formerait-elle d'abord dans l'action qu'elle exige, et l'action qu'elle décrit. Cette théorie ne donne-t-elle pas un sens particulier au sens de la langue, celui de la narration. Dire et représenter les actions qu'on engage.
+
+Si la langue se construit sur le verbe de la phrase, il faut penser que le performatif n'est pas un côté de la langue, mais son principe même. Chaque phrase que l'on prononce intime un ordre du sur le monde. IL peut être magie comme une prière à la pluie, il peut être intimation, fais ce que je dit, il peut être affirmation, ce que je dis est vrai et va avoir des conséquences. Il peut être descriptif : voila ce que nous avons fait. On imagine que l'histoire de la langue est un affaiblissement : de performative elle est devenue descriptive. C'est une hypothèse naive. 
+
+
+```{r lemme01, echo = TRUE, fig.height=6, fig.width=9}
+
+# le left joined permet de mettre à niveau le terme et la source de la relation syntaxique
+res<-obj$token
+ggplot(res,aes(x=relation))+geom_bar()+coord_flip()
+foo<- res%>%
+  left_join(res,by= c("doc_id"="doc_id", "sid"="sid", "tid_source"="tid"), suffix=c("", "_source")
+  ) %>%   left_join(df, by="doc_id")
+
+vol<-foo %>% group_by(month) %>% tally()
+
+#on filtre les relation nominales puis celle qui concerne le masque
+foo<-foo %>%
+  filter(relation == "amod"|relation =="acl"|relation =="nmod"|relation =="appos") %>%
+  select(doc_id = doc_id, start = lemma, word = lemma_source, month=month) %>%
+    filter(word=="masque",start!="xxxx",start!="xxxxx", start !="c'",start !="l'" )%>% 
+  group_by(start,month)%>%
+  mutate(n=1)%>%
+  summarise(n=sum(n))
+
+# On remet en forme les données
+foo1<-cast(foo, start ~  month)
+foo1[is.na(foo1)] = 0
+foo1$sum<- rowSums( foo1[,3:6])
+foo1<-foo1 %>% filter(sum>30) %>%select(-sum)
+
+foo1<-melt(foo1)
+foo1<-foo1%>%mutate(month2=ifelse(variable=="2","Fev",ifelse(variable=="3","Mars", ifelse(variable=="4", "Avril",ifelse(variable=="5", "Mai", NA)))))%>% select(-variable) %>%filter(!is.na(month2))
+foo1$month2<-factor(foo1$month2,ordered = TRUE, levels = c("Fev", "Mars","Avril", "Mai"))
+
+#on rapporte les fréquences au nombre de token du mois sur la base de n mots pour 1000 token par mois. n*10(-3)/mois
+#c'est l'idée de densité qui permet les comparaison dans l'absolu c'est une vraie métrique
+foo1<-foo1 %>% mutate(value1=ifelse(month2=="Fev",(value/2289.387),
+                                    ifelse(month2=="Mars",(value/2629.932),
+                                           ifelse(month2=="Avril",value/2678.883,
+                                                    ifelse(month2=="Mai",(value/1975.071), 0)))))
+
+ggplot(foo1,aes(x=reorder(start,value1), y=value1, group=month2))+
+  geom_bar(stat="identity",aes(fill=month2),position=position_dodge())+
+  coord_flip()+
+  scale_fill_brewer(palette="Spectral",direction = -1)+
+  theme_minimal()+ 
+  labs( title="Analyse des dépendances nominales", subtitle = "les termes du masque", x="tokens dépendants", y="densité (pour 1000 mots)", fill="Mois")+facet_wrap(vars(month2), ncol = 4)
+ggsave("dependenciesmasque.jpg",plot=last_plot())
+
+```
+
+```{r lemme01, echo = FALSE, fig.height=8}
+
+
+
+lemmes<-obj$token%>%
+  filter(upos == "ADJ") %>% mutate(n=1) %>% 
+  group_by(lemma) %>% summarise(n=sum(n)) %>% filter(lemma != "xxxxx") %>% filter( lemma != "xxxx") %>% filter(lemma!="coronavirus")%>% filter(n>800)
+
+g3<-ggplot(lemmes,aes(x=reorder(lemma,n),y=n))+
+  geom_point(stat="identity",color="royalblue")+coord_flip()+
+  theme(text = element_text(size=7))+theme_minimal()+
+  labs(title = "Adjectifs  les plus fréquents",caption = "",x="",y="Effectifs")
+
+g3
+```
+
+## Evolution de mots cibles
+
+On utilise ici une idée simple mais pas facile à mettre en oeuvre. Même en lemmatisant de nombreux mots proches seront considéré comme distincts : mille-feuilles, millesfeuilles, millefeuille, milles-feuilles, . Pir encore : corona, coronavirus, coronavir, coronarvirus etc... La simplicité de la méthode consiste à définir des motifs. Ici la racine est *corona* le * représente n'importe qu'elle caractère, on aurait pu réduire à coron, mais on aurait fait une confusion avec coroner. Ce principe est systématiser dans la méthode des regex, ou expressions régulières, où un jeu de convention limitée, permet de détruire une grande variété de motifs morphologique : un numero de téléphone, une url, un prix, .
+
+La maitrise de ce langage, car s'en est un un , est difficile, et relève plus de l'art que de la science, un art de résolution de problème logique. Mais même avec des expressions simples, élémentaires, on peut réaliser des tâche intéressantes.
+
+la base contient 5,447 millions de tokens (mots) pour 273 389 textes. (ce n'est pas exact c'est le double il faut redonner les valeurs exactes)
+
+```{r pos2, fig.width=9}
+df$day<-as.numeric(format(df$parsed_created_at, "%d")) # jour
+df$month<-as.numeric(format(df$parsed_created_at, "%m")) # mois
+df$hour<-as.numeric(format(df$parsed_created_at, "%H")) # heure
+df$year<-2020 # heure
+df$date<-paste0("2020","-",df$month,"-",df$day)
+df$date2 <- as.POSIXct(strptime(df$date, "%Y-%m-%d"))
+
+df<-df %>% mutate(Jour=ifelse(month==1,day,ifelse(month==2,day+31,ifelse(month==3,day+59,ifelse(month==4, day+90,ifelse(month==5,120+day,151+day))))))
+df$Jour<-as.factor(df$Jour)
+token<- token%>%select(-doc_id)
+foo<-cbind(df,token)
+
+foo<-obj$token %>% left_join(foo)
+
+foo$date<-paste0("2020","-",foo$month,"-",foo$day)
+foo$date2 <- as.POSIXct(strptime(foo$date, "%Y-%m-%d"))
+# tres important les regex pour retrouver les variantes
+df_lemma<-foo %>% 
+  mutate(lemma=ifelse(grepl("^corona.*",lemma),"corona",lemma),
+         lemma=ifelse(grepl(".*covid.*",lemma),"covid",lemma),
+         lemma=ifelse(grepl("^chloro.*",lemma),"chloroquine",lemma),
+         lemma=ifelse(grepl("^masqu.*",lemma),"masque",lemma),
+         lemma=ifelse(grepl("^confine.*",lemma),"confinement",lemma),
+         lemma=ifelse(grepl("d[eéèêë]confin.*",lemma),"déconfinement",lemma),
+         lemma=ifelse(grepl("^gouve.*",lemma),"gouvernement",lemma),
+         lemma=ifelse(grepl("^politi.*",lemma),"politique",lemma),
+         lemma=ifelse(grepl("sanit.*",lemma),"sanitaire",lemma),
+         lemma=ifelse(grepl("^gel.*",lemma),"gel",lemma),
+         lemma=ifelse(grepl("^geste.*",lemma),"geste",lemma),
+         lemma=ifelse(grepl("^test.*",lemma),"test",lemma),
+         lemma=ifelse(grepl("^t[e,é])l[e,é].*trav.*",lemma),"télétravail",lemma),
+         lemma=ifelse(grepl("^h([o,ô]|[os,ôs])pital.*",lemma),"hôpital",lemma),
+         upos=ifelse(grepl("^[eéèêë]tre",lemma),"VERB", upos),
+         upos=ifelse(grepl("^avoir",lemma),"VERB",upos)
+         )
+df_lemma<-df_lemma %>% 
+  mutate(lemma=ifelse(grepl("^chin.*",lemma),"chine",lemma),
+         lemma=ifelse(grepl("^fran[c,ç][e,a].*",lemma),"france",lemma),
+         lemma=ifelse(grepl("^alle.*",lemma),"allemagne",lemma),
+         lemma=ifelse(grepl("^itali*",lemma),"italie",lemma),
+         lemma=ifelse(grepl("^[é,e]tat.*uni.*",lemma),"etats-unis",lemma),
+         lemma=ifelse(grepl("^br[e,é]sil.*",lemma),"bresil",lemma),
+         lemma=ifelse(grepl("^singapour*",lemma),"singapour",lemma),
+         lemma=ifelse(grepl("^viet*",lemma),"vietnam",lemma),
+         lemma=ifelse(grepl("^afri[c,q].*",lemma),"afrique",lemma),
+         )
+#juste pour avoir une idée de ce qu'on ramène dans le filet
+#fooz<-df_lemma %>% filter(grepl("h([o,ô]|[os,ôs])pital.*",lemma))%>%group_by(lemma) %>% mutate(n=1)%>% summarise(n=sum(n))
+```
+
+On représente l'évolution de la fréquence des termes.On ne tient pas compte de la volumétrie, ce qui serait une sérieuse amélioration.
+
+Un lissage en moyenne mobile sur 7 jours semble donner les meilleurs résultats, on utilise la fonction roll_mean à cet effet.
+
+```{r pos2,fig.height=6, fig.width=9}
+
+foo2<-df_lemma %>% 
+  group_by(date2,lemma) %>% mutate(n=1)%>%
+  summarise(frequence=sum(n)) %>%
+  ungroup()  %>%
+  group_by(date2) %>% 
+  arrange(date2, desc(frequence), lemma)
+
+token_j<-foo2 %>% group_by(date2) %>% summarise(total=sum(frequence))
+
+library(RcppRoll)
+
+foo3 <- foo2 %>% left_join(token_j) %>% 
+  mutate(density=frequence/total) %>% 
+  filter(lemma=="masque"|lemma=="corona"|lemma=="covid"| lemma=="confinement"| lemma=="déconfinement" |lemma=="teletravail"|lemma=="geste") %>%  
+  group_by(lemma)%>%
+  mutate(ranking=roll_mean(as.numeric(density),7,na.rm = TRUE, fill=NA))
+
+col<-c('royalblue2','coral1','coral3','skyblue2','chartreuse3','chartreuse4', 'chartreuse1' )
+library(scales)
+ggplot(data = foo3, aes(x = date2, y = ranking, group = lemma)) +
+  geom_line(aes(color = lemma), size =1.2)+
+  theme_minimal()+
+  scale_color_manual(values=col)+labs(title ="Evolution de la densité des lemmes", x=NULL, subtitle = "Les termes correspondent à des expressions regulières, les courbes sont lissées sur 7 jours",y="densité journalière")+
+  scale_y_continuous(trans="log10", label=comma)+ 
+  geom_vline(xintercept = as.POSIXct("2020-03-17",format="%Y-%m-%d"), linetype="solid",color = "grey40", alpha=.5,size=3)+
+    geom_vline(xintercept = as.POSIXct("2020-05-11",format="%Y-%m-%d"), linetype="solid",color = "grey80",alpha=.5, size=3)
+
+
+
+ggsave("evolutionmasque1.jpg",plot=last_plot(),width = 9, height = 6)
+```
+
+Idem pour les pays
+
+```{r pos2b,fig.width=9, fig.height=6}
+
+foo3 <- foo2 %>% left_join(token_j) %>% 
+  mutate(density=frequence/total) %>% 
+  filter(lemma=="chine"|lemma=="france"| lemma=="italie"| lemma=="allemagne"| lemma=="espagne"| lemma=="etats-unis"| lemma=="bresil") %>%  group_by(lemma)%>%
+  mutate(ranking=roll_mean(as.numeric(density),7,na.rm = TRUE, fill=NA))
+
+col<-c('gold1','chartreuse4','firebrick2','orange','royalblue1','royalblue3',"chartreuse3")
+library(scales)
+ggplot(data = foo3, aes(x = date2, y = ranking, group = lemma)) +
+  geom_line(aes(color = lemma), size =1.3)+
+  theme_minimal()+scale_color_manual(values=col)+
+  labs(title ="Evolution de la densité des lemmes", subtitle = "Les termes correspondent à des expressions regulières, les courbes sont lissées sur 7 jours",y="densité journalière",x=NULL)+  scale_y_continuous(trans="log10",labels=comma)+ 
+  geom_vline(xintercept = as.POSIXct("2020-03-17",format="%Y-%m-%d"), linetype="solid",color = "grey40",alpha=.5, size=3)+
+    geom_vline(xintercept = as.POSIXct("2020-05-11",format="%Y-%m-%d"), linetype="solid",color = "grey80",alpha=.5, size=3)
+
+
+ggsave("evolutionmasque2.jpg",plot=last_plot(),width = 9, height = 6)
+```
+
+On complète avec d'autres solutions d'atténuation. 
+
+```{r pos2c,fig.width=9, fig.height=6}
+
+foo3 <- foo2 %>% left_join(token_j) %>% 
+  mutate(density=frequence/total) %>% 
+  filter(lemma=="masque"|lemma=="sanitaire"| lemma=="hôpital"| lemma=="test"| lemma=="gel"| lemma=="chloroquine"|lemma=="vaccin") %>%  group_by(lemma)%>%
+  mutate(ranking=roll_mean(as.numeric(density),7,na.rm = TRUE, fill=NA))
+
+
+col<-c('gold2','chartreuse1','royalblue1','darkgreen','skyblue', "chartreuse3", "orange")
+library(scales)
+ggplot(data = foo3, aes(x = date2, y = ranking, group = lemma)) +
+  geom_line(aes(color = lemma), size =1.3)+
+  theme_minimal()+scale_color_manual(values=col)+
+  labs(title ="Evolution de la densité des lemmes", subtitle = "Les termes correspondent à des expressions regulières, les courbes sont lissées sur 7 jours",y="densité journalière",x=NULL)+
+  #scale_y_continuous(trans="log10",labels=comma)+ 
+  geom_vline(xintercept = as.POSIXct("2020-03-17",format="%Y-%m-%d"), linetype="solid",color = "grey40", alpha=.5,size=3)+  geom_vline(xintercept = as.POSIXct("2020-05-11",format="%Y-%m-%d"), linetype="solid",color = "grey80", alpha=0.5, size=3)+
+
+ggsave("evolutionmasque3.jpg",plot=last_plot(),,width = 9, height = 6)
+
+```
+
+## La boucle pour produire les réseaux sémantique
+
+l'approche ici va être simple, elle s'ppuie sur l'analyse des cooccurences. 
+
+un probleme de normalisation vient que les volumes varient dans le temps; quand la production est forte de nombreux liens sont activités, moins le sont quand la production est faible, il faut donc une astuce pour normaliser. Augmenter le seuil dans le ncorpus est grand , le réduire quand il est petit, un argument proportionnel sera suffisant.
+
+
+ * la boucle du jour1 au journ : 3 opérations
+ * calcul des cooccurences par période
+ * construction du graphe : introduire les coocurrence comme attribut des arc, de la fréquence du mot (density) pour les noeds, choix d'une méthode de projection : KR, 
+ * production du graphe
+ * calcul des centralité
+
+
+hyperparamètres :
+ * fréquence minimale des lemmes
+ * coefficient de division du nombre de tokens pour obtenir la fréquence minimale des cooccurences nt= mt/A ( A une constante et m le nombre de token de la période)
+
+A partir des réseaux construits, on étudie la centralité de certains termes et en particulier celle du masque. Parmis les très nombreuses mesures, [CINNA](https://cran.r-project.org/web/packages/CINNA/vignettes/CINNA.html#suggestion-of-proper-centralities) en propose 49, on en retient trois :
+
+ * Closeness Centrality : eloignement moyen is defined as the inverse of farness, i.e. the sum of the shortest distances
+ * between a node and all the other nodes. Let distance(Vi , Vj) be the shortest distance between nodes Vi and Vj (in our case, computed using inverted edge weights to use co-occurrence information),
+ * Degree centrality : y is defined as the number of edges incident upon a node. Applied to a word graph, the degree of a node Vi represents the number of words that co-occur with the word corresponding to Vi
+ * Betweenness centrality quantifies the number of times a node acts as a bridge along the shortest path between two other nodes.
+
+
+```{r Cooc1-17, fig.width=9}
+#df$id<-as.factor(df$id)
+#library(lubridate) pour fonction week
+lem00<-df_lemma %>% mutate(n=1)%>%
+  group_by(lemma) %>%
+  summarize(n = sum(n))
+dim(lem00)
+foo<-df_lemma %>% select(id,doc_id,token, lemma,upos,month,day,date2)
+foo4<-lem00 %>% left_join(foo,by="lemma") 
+foo4<-foo4 %>% mutate(Jour=ifelse(month==1,day-28,
+                                  ifelse(month==2,day+3,ifelse(month==3,day+32,
+                                                               ifelse(month==4, day+63,93+day)))))%>%
+  mutate( week = week(date2)) %>% filter(!grepl("^xxx.*",lemma)) %>% 
+  filter(lemma !="corona") %>% 
+  filter(lemma !="covid") %>%  
+  filter(lemma!="de") %>% filter(upos=="NOUN") %>% filter(n > 10)
+dim(foo4)  
+  
+
+df$Jour<-as.factor(df$Jour)
+min(foo4$date2)
+max(foo4$week)
+for (i in 5:22) {
+df_Day <- foo4 %>%
+  filter(week == i)
+a=nrow(df_Day)
+
+m<-round(a/2500,0)
+
+actu<-""
+actu[df_Day$week==5]<-paste0(df_Day$date2," : 10 000 personnes touchées dans le monde, Wuhan confiné" )
+actu[df_Day$week==6]<-paste0(df_Day$date2," : Le découvreur du virus est mort Li Wenliang" )
+actu[df_Day$week==7]<-paste0(df_Day$date2," : Un touriste chinois de 80 ans, est mort, premier décès lié à ce virus en Europe 15 février" )
+actu[df_Day$week==8]<-paste0(df_Day$date2," : Confinement partiel en Italie, absolu en chine" )
+actu[df_Day$week==9]<- paste0(df_Day$date2," : Premiers cas français - blagues sur la bière Corona" )
+actu[df_Day$week==10]<-paste0(df_Day$date2," : Le tournant chinois" )
+actu[df_Day$week==11]<-paste0(df_Day$date2," : L'italie se confine avec 100 morts,moins de 20 morts en France et premières mesures" )
+actu[df_Day$week==12]<-paste0(df_Day$date2," : Elections municipales- début du confinement" )
+actu[df_Day$week==13]<-paste0(df_Day$date2," : On passe à 200 morts par jour" )
+actu[df_Day$week==14]<-paste0(df_Day$date2," : 125 000 français sont rappatriés, l'OMS encourage le masque" ) 
+actu[df_Day$week==15]<-paste0(df_Day$date2," : On passe le cap des 10000 morts à l'hopital" )
+actu[df_Day$week==16]<-paste0(df_Day$date2," : 4 semaine de plus de confinement et une date de sortie " )
+actu[df_Day$week==17]<-paste0(df_Day$date2," : Prudence du conseil scientifique et retour de Boris Johnson" )
+actu[df_Day$week==18]<-paste0(df_Day$date2," : Publication du plan de déconfinement - /n La france entre en recession et dans le WE du 1er Mai" )
+actu[df_Day$week==19]<-paste0(df_Day$date2," : Préparation du déconfinements : carte, masques, et plan de circulation" )
+actu[df_Day$week==20]<-paste0(df_Day$date2," : début du déconfinement" )
+actu[df_Day$week==21]<-paste0(df_Day$date2," : poursuite du déconfinement progressif" )
+actu[df_Day$week==22]<-paste0(df_Day$date2," : A Paris, bars et restaurants pourront s’étendre sur les trottoirs et des places de stationnement" )
+
+cooc <- df_Day %>%  pairwise_count(lemma, feature = id,sort=T) 
+#ggplot(cooc,aes(x=n))+geom_histogram()
+cooc2 <- cooc %>%
+  filter(n > m)
+
+lem_density <-df_Day %>% group_by(lemma) %>%mutate(n=1)%>%summarise(density=sum(n)/a)
+
+test<-cooc2 %>%group_by(item1) %>%mutate(n=1)%>%summarise(n=sum(n))%>%mutate(lemma=item1) %>%left_join(lem_density)
+
+mots_g <- igraph::graph_from_data_frame(cooc2)
+
+library(ggraph)
+my_graph <- mots_g %>%
+   ggraph::ggraph(layout = "fr") +
+   ggraph::geom_edge_link(edge_colour="royalblue1",aes(width=cooc2$n) )+
+   ggraph::geom_edge_density(fill="Pink") +  geom_edge_link(alpha = 0.25)+
+   ggraph::geom_node_point(aes(size=test$density),color = "gold2") +
+   ggraph::geom_node_text(aes(label = name), repel = TRUE, cex=3) +
+   ggplot2::theme_void() + 
+   labs(title = paste("Semaine ",i," : ",actu))
+
+plot(my_graph)
+ggsave(paste("week",i,".jpg"), width=10,height=9)
+
+}
+```
+
+## calcul de centralité
+Il y en a enormement voir Cinna
+
+indice de centralité
+ * betweenness : nombre de fois où un lien est sur le plus court chemin entre deux autres noeuds
+ * degree : nombre de lien associé à chaque noeud
+ * closeness : la proximité à tous les autres liens
+```{r Cooc1-17, fig.width=9}
+foo<-between %>%filter(lemma=="azouzi")
+i=5
+for (i in 5:22) {
+df_Day <- foo4 %>%
+  filter(week == i)
+a=nrow(df_Day)
+m<-round(a/3000,0)
+
+cooc <- df_Day %>%  pairwise_count(lemma, feature = id,sort=T) 
+#ggplot(cooc,aes(x=n))+geom_histogram()
+cooc2 <- cooc %>%
+  filter(n > m)
+
+mots_g <- igraph::graph_from_data_frame(cooc2)
+between1<-as.data.frame(igraph::betweenness(mots_g))
+between1$betweenness<-between1[,1]
+
+between2<-as.data.frame(igraph::degree(mots_g))
+between2$degree<-between2[,1]
+
+between3<-as.data.frame(igraph::closeness(mots_g))
+between3$closeness<-between3[,1]
+
+between<-cbind(between1, between2,between3)
+between$lemma<-rownames(between)
+
+between<-between %>% select(lemma,betweenness,degree,closeness)
+between$week=i
+#foo<-central %>%filter(week==0)
+foo<-rbind(foo,between)
+}
+
+
+masque<-foo %>%filter(lemma=="masque") %>%select(-lemma)
+
+masque$week<-as.numeric(masque$week)
+masque<-melt(masque,id="week")
+ggplot(masque,aes(x=week, y=value))+geom_line(stat="identity", aes(color=variable), size=1.5)+
+  facet_wrap(vars(variable),ncol=1, scale="free" )+
+  theme_minimal()+labs(title=" Evolution de la centralité du masque ", x="Semaine de l'année")+scale_color_brewer(palette="Set1")
+ggsave("centrality.jpg",plot=last_plot(),,width = 9, height = 6)
+
+
+```
+
+
+pour les gifs on utilise
+https://gifmaker.me/
+et pour le son
+https://voice2v.com/fr/add-audio-to-video/
+
+
+Les résultats sont [ici sur un air de brel](https://www.youtube.com/watch?v=mTMncSuF_ds) et [là avec Lorenz](https://www.youtube.com/watch?v=VzRmp-9vtZE)

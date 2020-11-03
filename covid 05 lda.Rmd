@@ -1,0 +1,629 @@
+---
+title: "40 ans de PMP"
+author: "cb et mb"
+date: "30/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE,cache=TRUE,warning=FALSE,message = FALSE )
+library(tidyverse) #on ne peut plus s'en passer
+library(quanteda) # les bases du nlp
+library(spacyr)
+devtools::install_github("quanteda/quanteda.corpora")
+devtools::install_github("kbenoit/quanteda.dictionaries")
+library(readr) #lire les donnees
+library(stringr) #manipuler le texte
+library(pals)
+library(ape) #pour de jolis dendogrammes
+library(tidytext) #du nlp
+library(proustr) #un package sympa pour les dicos
+library(mixr)
+library(widyr)
+library(reshape2) 
+library(igraph) #classic des reseaux
+library(ggrepel) #gestion des labels
+library(ggraph) 
+library(gglorenz) #courbe de concentration
+library('extrafont') #c'est pour igraph
+# Import des fontes du système - cela peut être long
+#font_import()
+#fonts() # Liste des polices disponibles
+#loadfonts(device = "pdf") # Indiquer device = "pdf" pour produire un pdf 
+
+```
+
+Le projet est simple : ingérer près de 40 ans de production de la revue PMP, pour en retracer les évolutions principales en terme d'autorialité et de contenu thématique. c'est une démarche de lecture automatique et algorithmique qui vise à retracer la vie d'un processus de production éditoriales et d'une communauté intellectuelle.
+
+Dans ce document on retrace les calculs, mais leur production sera guidée par des conférences d'experts : des animateurs, des rédacteurs en chefs, des auteurs, qui donneront sur un registre qualitatif ( réunion de groupe, note de synthèse).
+
+La grille d'analyse est sans doute celle d'une sociologie des professions avec l'hypothèse de la mutation du métier d'universitaire ou d'enseignants chercheurs passant d'un modèle vocationnel à un modèle professionel. L'analyse des évolution visera à tester cette hypothèse.
+
+On commence à analyser les auteurs et par conséquent le procès de production.
+
+On continue par les contenus ( résume+titre) avec une approche originale de modèle de topic structural.
+
+Un objectif intermédiaire : la constitution d'un corpus en CC et open.
+le sens de la recherche est d'observer les mutations des stratégies de publication et de de contenu. au travers d'une micro histoire quantitattive*
+
+
+
+# le cadre de l'analyse
+
+la production d'un corpus éditorial, une revue, est le fruit de plusieurs processus
+
+- un processus de proposition
+- un processus d'acceptation  qui reflète la politique éditoriale
+- un processus de soumissions aux modes du temps, l'actualité peut etre exigeante.
+
+des efforts de la revue pour obtenir des propositions : les coloquuez
+
+
+
+
+
+Re
+
+
+## les quantités du corpus
+
+à noter : travailler sur l'évolution de la longueur des titres.et résumé
+
+
+## les mots les plus fréquents
+
+On tokenize notre corpus ( on decoupe en mots), les 1040 textes sont constitués de 14415 tokens - termes, après élimination des stopwords et de la ponctuation. 
+
+```{r corpus1}
+library(readr)
+PMP <- read_csv("PMPLast.csv")
+dn<-PMP %>% select(Key,`Publication Year`,Title, `Abstract Note`)%>% 
+  rename(Year=`Publication Year`, Abstract=`Abstract Note`) %>% 
+  mutate(text=paste0(Title,". ", Abstract),
+         nchar=nchar(text),
+         n_words = stringr::str_count(text, ' ')+1,
+         decade=ifelse(Year<2000,(floor((Year-1900)/10)*10)+1900,(floor((Year-2000)/10)*10)+2000)) %>%                        filter (nchar>10)
+
+ggplot(dn, aes(x=nchar))+geom_histogram(binwidth = 20)+theme_minimal()
+ggplot(dn, aes(x=n_words))+geom_histogram(binwidth = 20)+theme_minimal()
+ggplot(dn, aes(x=nchar,y=n_words))+geom_point()+theme_minimal()
+
+dn_year<-dn %>% group_by(Year) %>% summarise(n_paper=mean(n_words))
+ggplot(dn_year, aes(x=Year,y=n_paper))+
+  geom_line(color="darkgreen",size=1.5)+
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))+
+  theme_minimal()+
+  labs(title="Evolution du nombre de mots par abstract",y="nombre moyen d'e mot par article",x="Année de publication",caption="corpus PMP")
+
+
+corp <- corpus(dn$text, docvars=(dn))  # corps des auteueut
+```
+
+```{r corpus2b, fig.height=8,fig.width=10}
+
+toks <- tokens(corp, remove_punct = TRUE,padding=FALSE)%>% tokens_select(pattern = stopwords('french'), selection = 'remove')
+dfm <- dfm(toks, remove = stopwords("french"))
+dim(dfm)
+quant <- dfm_trim(dfm, min_termfreq = 5, max_termfreq= 10000)
+
+tstat_freq <- textstat_frequency(dfm, n = 50)
+
+
+ggplot(tstat_freq,aes(x=reorder(feature,docfreq),y=docfreq,group=group))+
+  geom_line(stat="identity",size=1.5,color="firebrick")+
+  theme_minimal()+coord_flip()+scale_color_discrete()+
+  labs(title="les mots les plus fréquents dans les titres des articles de PMP")
+
+```
+## Avec collocation
+
+La nature même du texte , académique est formel engage a ne pas se contenter des mots mais à identifier les expressions, ce qui est fait avec la fonction de collocation fournie par quanteda. On test l'ensemble des bigrams sans filtage du voacabulaire en favorisant le lambda dont on rélise par un examen visuel qu'à moins de 2.8 il correspond à des groupes determinatifs : de la; des expression verbales
+
+```{r corpus2b, fig.height=8,fig.width=10}
+
+toks <- tokens(corp, remove_punct = TRUE,padding=FALSE)
+
+
+tstat_col_caps <- tokens_select(toks, case_insensitive = FALSE,
+                                padding = FALSE) %>% 
+           textstat_collocations(min_count = 3, size=2:5)
+head(tstat_col_caps, 1000)
+```
+
+```{r corpus2b, fig.height=8,fig.width=10}
+
+
+toks_comp <- tokens_compound(toks, pattern = tstat_col_caps[tstat_col_caps$lambda > 2.7]) %>% 
+ tokens_select(pattern = stopwords('french'), selection = 'remove')
+
+
+dfm <- dfm(toks_comp)
+dim(dfm)
+#quant <- 
+
+tstat_freq <- dfm %>% dfm_trim( min_termfreq = 5, max_termfreq= 100)%>% 
+  textstat_frequency( n = 50)
+
+
+ggplot(tstat_freq,aes(x=reorder(feature,frequency),y=frequency,group=group))+
+  geom_line(stat="identity",size=1.5,color="firebrick")+
+  theme_minimal()+coord_flip()+scale_color_discrete()+
+  labs(title="les mots les plus fréquents dans les titres des articles de PMP")
+
+
+
+```
+
+On s'est contenté de tokeniser, sans tenir compte des flexions. Examinons les mots les plus fréquents d'abord par un nuage de mots en otant les mots trop fréquents et trop peu fréquents. Un réglage intéressant est min=5, max=70.
+
+les mots manquants : citoyen - innovation - justice - police - éducation - social ...
+
+```{r corpus2}
+
+
+quant_dfm <- dfm_trim(dfm, min_termfreq = 10, max_docfreq = 130)
+
+textplot_wordcloud(quant_dfm, min_count = 10, random_order = FALSE,
+                   rotation = .25,
+                   color = RColorBrewer::brewer.pal((5), "PuBu"))
+```
+
+et le top 50 : brut de brut avant pre processing ou lemmatisation.
+
+il faut de la collocation
+
+## Des périodes bien discriminées
+
+regardons l'évolution par décade avec deux méthode de data viz
+
+la première est fournie par quanteda elle met en évidence les termes discrimants et donne une bonne idée de l'évolution des centres d'intéret par décade. Les années 80 sont hantées par le public/privé. les 90 par la question européennes. le millénaire est affaire de responsabilité, la contingence et l'étude marque un tournant empirique au tournant dans la dernière décennie. un renoncement ?
+
+```{r corpus3}
+
+quant_deca<- dfm_group(dfm, groups = "decade", fill = TRUE, force = TRUE)
+textplot_wordcloud(quant_deca,min_count = 10,random_order = FALSE,comparison=TRUE,
+                   rotation = .25,
+                   color = RColorBrewer::brewer.pal(4, "Paired"))
+```
+
+La seconde procédure donne les nuages de mots avec une grande finesse pour les quatres périodes et apporte une vision de détail et une meilleure idées des continuités fréquentielles.
+
+
+
+```{r corpus3b, fig.height=9,fig.width=12}
+
+annot_plot <- as.data.frame(t(as.matrix(quant_deca)))
+annot_plot$termes <-rownames(annot_plot)
+annot_plot <- melt(annot_plot) %>% filter(value>20 & value< 130)
+library(reshape2)
+library(ggwordcloud)
+ggplot(annot_plot, aes(label = termes, size = value, color=value)) +
+  geom_text_wordcloud(eccentricity = .45) +
+  scale_size_area(max_size = 7) +
+  theme_minimal() +
+  scale_color_gradient(low="#fb6a4a", high="#67000d") + 
+  facet_wrap(~variable)
+
+```
+
+## selections de mots
+
+On construit des thèmes lexicaux, on s'aidrea ensuite de vectoristaion.
+
+```{r worfreq1}
+library(syuzhet)
+my_text <- dn$text
+method <- "custom"
+custom_lexicon1 <- data.frame(word=c("évaluation","évaluations", "performance", "performances", "contrôle", "résultat", "résultats", "mesure", "mesures"),
+                             value=c(1,1,1,1,1,1,1,1,1))
+custom_lexicon2 <- data.frame(word=c("territoire","territorial", "local", "collectivité", "collectivité locale", "collectivités locales", "locale", "locales", "mairie",  "département", "municipal"),
+                             value=c(1,1,1,1,1,1,1,1,1,1,1))
+
+custom_1 <- get_sentiment(my_text, method = method, lexicon = custom_lexicon1)
+custom_1<-as.data.frame(custom_1)
+
+custom_2 <- get_sentiment(my_text, method = method, lexicon = custom_lexicon2)
+custom_2<-as.data.frame(custom_2)
+
+foo<-cbind(dn,custom_1,custom_2) %>% group_by(Year) %>%
+  summarise(n_perf=sum(custom_1),n_collect=sum(custom_2))%>% 
+  melt(  id.vars="Year")
+
+ggplot(foo,aes(x=Year,y=value,group=variable))+geom_line(stat="identity", aes(color=variable), size=2)+geom_smooth(aes(color=variable))
+
+
+```
+
+```{r bigram1, fig.height=12,fig.width=12}
+
+col=c("firebrick","coral","blue","grey","chartreuse","purple3","purple1","lightblue","black","pink")
+
+ggplot(foo,aes(x=VAGUE ,y=frequence,group=variable))+geom_line(aes(color=variable),size=1.5)+
+  theme_minimal()+  labs(title = "Les préoccupations principales en période d'épidémie Covid19",x ="proportion des mention",y="proportion des individus citant l'item",caption = "« Baromètre COVID 19, https://datacovid.org »",ylab="vague d'enquête",xlab="vagues ")+scale_color_manual(values=col)
+
+```
+
+## Analyse des co-occurences
+
+le principe : deux mots sont proches s'ils se retrouvent souvent ensemble dans un même titre (puis résumé et mots clé)
+
+approche avec les lemmes de proust
+
+```{r bigram1, fig.height=12,fig.width=12}
+
+df_tok <-  dn %>%
+  unnest_tokens(output = "Mots",
+                input = text,
+                token = "words",
+                collapse = F) %>%
+  anti_join(proust_stopwords(),by=c("Mots"="word"))
+
+#tokens_ngrams(x, n = 2L, skip = 0L, concatenator = "_")
+
+
+lex_lm <- get_lexicon("fr")
+
+#On associe à la base les lemmes reconnus par le lexique
+df_tok <- left_join(df_tok,
+                    lex_lm,
+                    by=c("Mots"="word"))
+df_tok$lemma[is.na(df_tok$lemma)==TRUE]<-df_tok$Mots
+#     DEBUT DE TRAITEMENT                                                    #
+
+#On crée un sous ensemble de donnée, on filtre le résultat sur les noms/adjectifs reconnus et l'on supprime les mots inutiles
+df_tok_fltr <- df_tok %>%
+  select(decade,Key,Mots,lemma,type) %>%
+  filter(type %in% c("nom","adj","ver")) 
+
+df_tok_fltr1 <- df_tok_fltr %>%
+  filter(Mots != c("public","politique")) %>%
+  filter(lemma!= c("public","politique"))
+
+
+#On calcule les frequences afin de voir les mots les plus utilisés par les twittos
+frq <- df_tok_fltr1 %>%
+  group_by(lemma) %>%
+  summarise(freq=n()) %>%
+  arrange(desc(freq))
+
+#On filtre les fréquences risquant de saturer le graphique (Confinement + jours)
+frq <- frq %>%
+  filter(freq < 12000)
+
+#On visualise le résultat
+ggplot2::ggplot(dplyr::filter(frq,freq>15),
+                ggplot2::aes(x=forcats::fct_reorder(lemma,freq), y=freq)) +
+  ggplot2::geom_bar(stat="identity", fill="skyblue")+
+  ggplot2::coord_flip() + theme_minimal()+
+  labs(title="Distribution du nombre d'articles par auteur",caption="corpus PMP")
+
+
+
+#On calcule les coocurrences des termes afin de voir avec lesquels ces derniers s'associent le plus
+cooc <- df_tok_fltr1 %>%
+  pairwise_count(lemma, feature = Key,sort=T) 
+
+#On filtre les coocurrences afin de n'obtenir que les plus répétées.
+cooc2 <- cooc %>%
+  filter(n > 4)
+
+#On construit le grapphique en structurant les fréquences recencées en tableau de données
+mots_graph <- igraph::graph_from_data_frame(cooc2)
+
+#On définit le graphique
+my_graph <- mots_graph %>%
+   ggraph::ggraph(layout = "kk") +
+   ggraph::geom_edge_link(edge_colour="lightblue") +
+   ggraph::geom_node_point(color = "gold2", size = 3) +
+   ggraph::geom_node_text(aes(label = name), repel = TRUE) +
+   ggplot2::theme_void()
+#On visualise le résultat sous forme de réseau
+plot(my_graph)
+
+```
+
+la même chose mais par période
+
+```{r Cooc1-17, fig.width=9}
+
+i=1980
+
+for (i in seq(1980, 2010, by=10)) {
+df_Day <- df_tok_fltr1%>%
+  filter(decade == i)
+
+m<-2 #0/log(nrow(df_Day))
+actu<-""
+actu[df_Day$decade==1]<-"1983 : création de la revue" 
+
+cooc <- df_Day %>%
+  pairwise_count(lemma, feature = Key,sort=T) 
+
+cooc2 <- cooc %>%
+  filter(n > m)
+
+mots_graph <- igraph::graph_from_data_frame(cooc2)
+
+my_graph <- mots_graph %>%
+   ggraph::ggraph(layout = "kk") +
+   ggraph::geom_edge_link(edge_colour="steelblue") +
+   ggraph::geom_node_point(color = "gold3", size = 2.5) +
+   ggraph::geom_node_text(aes(label = name), repel = TRUE, cex=3) +
+   ggplot2::theme_void() + 
+   labs(title = paste("Décade",i,": ",actu))
+
+plot(my_graph)
+ggsave(paste("Decade",i,".jpg"))
+}
+
+```
+Pour la dynamique voir pour developpements : 
+
+https://programminghistorian.org/en/lessons/temporal-network-analysis-with-r#beyond-the-hairball-dynamic-network-metrics
+
+et aussi http://estebanmoro.org/post/2015-12-21-temporal-networks-with-r-and-igraph-updated/
+et surtout là 
+
+http://statnet.org/Workshops/ndtv_workshop.html#importing-event-or-spell-data
+
+
+## Analyse en bigrammes
+
+Un bigramme c'est une paire de mots qui se succède. La phrase "la gestion publique territoriale", génère les bigrammes : " la gestion" "gestion publique", "publique territoriale". 
+
+```{r bigram2a, fig.height=12,fig.width=12}
+#library(ggrepel)
+
+#library(tidytext)
+#library(proustr)
+
+text_df <- tibble(text = dn$text)
+#on tokenize
+text_ngrams <- text_df %>% 
+  unnest_tokens(ngram, text, token = "ngrams", n = 2)
+#les ngrams les plus fréquents
+
+text_ngrams %>%
+  count(ngram, sort = TRUE)
+```
+On filTre avec les stops words
+
+```{r bigram2b, fig.height=12,fig.width=12}
+
+bigrams_separated <- text_ngrams %>%
+  separate(ngram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+head(bigram_counts,25)
+
+```
+
+```{r bigram2c, fig.height=12,fig.width=12}
+
+library(igraph)
+bigram_graph <- bigram_counts %>%
+  filter(n > 7) %>%
+  graph_from_data_frame()
+
+bigram_graph
+library(ggraph)
+set.seed(2017)
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(edge_width=2,edge_alpha=0.7,edge_color="darkolivegreen4") +
+  geom_node_point(node_color="darkolivegreen4") +
+  geom_node_text(aes(label = name), cex=4,vjust = 1, hjust = 1,repel=TRUE)+theme_minimal()
+
+```
+
+## un peu de vectorisation
+
+Nous avons traité de cooccurences au niveau des textes, mais ce qu'apporte les mots en terme sémantique dépend une distance.
+ prenons la phrase : " le mille feuille administratif empêche l'innovation" 
+ 
+Les cooccurence peuvent être nuancées en prenant en compte des sac de mots (bag of words), les coocuurence peuvent être nuancé par la distance des mots.
+
+On peu se donner une représentation des mots dans un espace arbitraire ( et de grande dimension) dans le but de bien représenter ces coocurrences, sur la base du principe que si souvent deux mots sont employés ensembles, c'est qu'il se décrivent l'un l'autre. La redondance est une synonymie masquée, Dans ce formalisme la coorélation est le cosinus de l'angle formé par ces deux vecteurs dans l'espace abstrait de grande dimension qu'on cherche à construire sous la condition de bien rendre compte des coocuurences.
+
+# Topic analysis
+
+L'analyse de topic est devenu un classique tu traitement du langage naturel. proposé par  blei en 2003, elle a connu diffférente variante dont une nous serait utile 
+mais la question du temps
+
+
+il faut lemmatiser
+du lda avec stm
+
+c'est un modèle particulier de topic qu permet d'introduire des co-variables. La nôtre est l'année.
+Roberts, Margaret E., Brandon M. Stewart, Dustin Tingley, Christopher Lucas, Jetson Leder-Luis, Shana Kushner Gadarian, Bethany Albertson, and David G. Rand. "Structural Topic Models for Open-Ended Survey Responses." American Journal of Political Science 58, no 4 (2014): 1064-1082.
+
+## préparation des données
+
+On prépare les données
+utilisation de la collocation pour les bigrams qui correspondent à des expressions. Puis on converti dans le format stm requis
+
+```{r stm01}
+set.seed(100)
+library("stm")
+
+head(cols <- textstat_collocations(corpus, size = 2, min_count = 2), 10)
+
+dfm<-dfm(corpus, tolower = TRUE,remove_punct = TRUE, remove_numbers = FALSE,remove = stopwords("french"),
+  stem = FALSE,  verbose = quanteda_options("verbose"))
+dfm
+dfm2stm <- convert(dfm, to = "stm")
+```
+
+## recherche du nombre de sujets
+
+on teste différentes solutions pour K , on dispose de 4 indicateurs
+
+ * La cohérence sémantique est une mesure liée à l'information mutuelle ponctuelle qui a été introduite
+dans un article de David Mimno, Hanna Wallach et collègues (voir références), :l'idée centrale est que dans les modèles sémantiquement cohérents, les mots qui sont les plus probables sous un sujet devraient se retrouver dans le même document.
+ * l'exclusivité
+ * le résidu : entre la prediction et l'effectif empirique
+ * held hout likehood ; c'est la vraissemblance claculée sur un autre jeu que celui qui a servi à l'estimer.
+ la meilleure et la plus courte est à 24 soltions
+
+```{r stm02}
+
+#kresult <- searchK(dfm2stm$documents, dfm2stm$vocab, K = c(5,10,15,20,21,22,23,24,25,26,27,28,29,30,31,32,35, 40,50), prevalence =~  s(Year), data = dfm2stm$meta)
+#plot(kresult)
+```
+
+Il semble qu'une solution à 26 topics semble intéressante
+
+## calcul du model
+
+la prévalence : l'effet du temps que nous avons déjà dénoté
+
+on présente les résultats en par des nuages de point propre à chacun des topics où la taille des mots est proportionnel à deux indicateurs
+ *  la probabilité que le mot appartiennent au topic, mais un mot fréquent aura une forte proba dans tout les topics
+ * flex qui identifie les mots qui distinguent le topics
+ 
+
+```{r stm03}
+k=28
+model.stm <- stm(dfm2stm$documents, dfm2stm$vocab, K = k, data = dfm2stm$meta, init.type = "Spectral", prevalence =~ s(Year),verbose = FALSE) # this is the actual stm call
+label<-as.data.frame(labelTopics(model.stm, n = 28)$Lift)
+plot(model.stm, type = "summary", labeltype="frex",text.cex = 0.8,n=5)
+
+```
+la description
+
+```{r stm04}
+
+par(mfrow = c(4,7) , mar = c(0,0,0,0))
+for (i in seq_along((1:k)))
+{
+  cloud(model.stm, topic = i, type ="model", max.words = 50, colors="darkblue", random.order=FALSE)
+  text(x=0.5, y=1, paste0("topic",i))
+
+}
+
+
+par(mfrow = c(4,7) , mar = c(0,0,0,0))
+for (i in seq_along((1:k)))
+{
+cloud(model.stm, topic = i,type = c("model", "documents"), dfm,thresh = 0.9, max.words = 50, colors="firebrick")
+   text(x=0.5, y=1, paste0("topic",i))
+
+}
+par(mfrow = c(4,7) , mar = c(0,0,0,0))
+
+
+model.stm.labels <- labelTopics(model.stm, 1:k)
+
+dfm2stm$meta$datum <- as.numeric(dfm2stm$meta$Year)
+
+model.stm.ee <- estimateEffect(1:k ~ s(Year), model.stm, meta = dfm2stm$meta)
+# Now we plot this estimation for a handful of topics (here 9 randomly chosen ones).
+par(mfrow = c(7,4) , mar = c(1,0,2,0))
+for (i in seq_along((1:k)))
+{
+  plot(model.stm.ee, "Year", method = "continuous", topics = i, main = paste0(model.stm.labels$frex[i,1:2], collapse = "-"), printlegend = T)
+
+}
+```
+
+```{r stm05}
+
+label<-as.data.frame(labelTopics(model.stm, n = 28)$Lift)
+plot(model.stm, type = "summary", labeltype="frex",text.cex = 0.8,n=5)
+
+
+plot(model.stm,type="labels")
+plot(model.stm, type="perspectives", topics=c(1,2), labeltype="frex")
+plot(model.stm,type="hist")
+
+
+```
+retrouver les textes liés aux topic
+
+```{r stm06}
+b<-NULL
+for (i in seq_along((1:k)))
+{
+
+  a<-paste0(model.stm.labels$frex[i,1:3], collapse = "-")
+b<-rbind(b,a)
+}
+b
+label<-as.data.frame(b)
+thoughts3 <- findThoughts(model.stm, texts = df$text, n = 3, topics = 1)$docs[[1]]
+thoughts3
+thoughts19 <- findThoughts(model.stm, texts = df$text, n = 2, topics = 19)$docs[[1]]
+thoughts19
+
+topic<-topicCorr(model.stm, method = "huge",verbose = TRUE)
+plot.topicCorr(topic, vertex.color = "green", vlabel=paste0(model.stm.labels$frex[i,1:3], collapse = "-"), vertex.label.cex = 1, vertex.label.color = "black", vertex.size =5)
+
+```
+
+
+https://juliasilge.com/blog/sherlock-holmes-stm/
+You can also embed plots, for example:
+
+ici un modèle spécifique :
+https://cran.r-project.org/web/packages/stm/vignettes/stmVignette.pdf
+
+
+
+les topics des textes :
+
+
+l'entropie maximale est de 39,07 On mesure la différence entre l'entropie observée et l'entropie minimale comme mesure du gain de diversité
+
+```{r word6}
+k=28
+doc_topic <-as.data.frame(model.stm$theta)
+doc_topic <- cbind(df,doc_topic)%>%select(-Abstract, -text,-Key,-Title,-decade,-Author)%>% mutate(Year=as.factor(Year))
+
+doc_topic1<-melt(doc_topic)
+
+topic<-doc_topic1 %>% 
+   group_by(Year,variable) %>% 
+   summarise(top=mean(value))%>%ungroup()  %>% mutate(Year=as.numeric(Year)) 
+
+ ggplot(topic,aes(x=Year,y=top)) +
+   geom_line(stat="identity",color="Orange3")+
+   geom_smooth()+theme_minimal()+facet_wrap(vars(variable),ncol=4, scales ="free")
+```
+
+```{r entropie}
+
+ trop<-topic%>% mutate(pLp = top*log(top)) %>% group_by(Year)  %>%summarise(entropie=-sum(pLp)) %>% ungroup 
+ 
+  ggplot(trop,aes(x=Year,y=entropie)) +
+   geom_line(stat="identity",color="darkgreen",size=1.5)+
+   geom_smooth()+theme_minimal() +
+  labs(title="Evolution de l'entropie",y="entropie/diversité",x="Année de publication",caption="corpus PMP")
+
+```
+
+# tracer les mots
+
+
+```{r word0000}
+
+#LDA <- dfm(corpus, 
+#                remove_punct = TRUE, remove_numbers = TRUE, tolower=TRUE,remove = stopwords("french")) %>% 
+#    dfm_trim(min_termfreq = 3, max_docfreq = 200)
+
+#library(topicmodels)
+#LDA_fit<- convert(LDA, to = "topicmodels") %>% 
+#    CTM(k = 12)
+
+# get top five terms per topic
+#get_terms(LDA_fit, 12)
+#graph <-build_graph(LDA_fit, lambda=0.2, and = FALSE)
+
+#ggraph(graph,layout = "fr")
+```

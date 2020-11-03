@@ -1,0 +1,276 @@
+---
+title: "Laboratoire du Confinement"
+subtitle: "Annotations du sentiment"
+author: "CB"
+date: "12 avril 2020"
+output: html_document
+---
+![sideco119-merci](sideco119-merci.jpg)
+
+Ce script succède au script `DfC_extract_V01_bc` destiné à organisation la collecte et la compilation des données brutes de twitter, il a pour objet la systématisation des opération d'annotations.  
+
+
+# Les outils de l'analyse
+
+Le but de l'exercice est de mesurer le sentiment dans la période covid19 au travers des twits générés avec le hashtag #confinementjourxx qui signale clairement l'intention de donner son sentiment, son humeur, sa pensée, son expérience. 
+ 
+
+```{r setup, include=FALSE, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE, cache=TRUE, message=FALSE,warning=FALSE)
+library(tidyverse) #l'environnement de base : données et visus
+library(rtweet) #extraction twitter
+library(gridExtra) #associer des ggplot
+library(ggrepel) #pour une belle labelisation des xy
+library(igraph) #pour l'analyse de réseau
+library(scales) #pour les échelles de temps et de date
+library(syuzhet)     # ncr      
+library(tm)
+library(quanteda) #with quanteda
+library(ggridges)
+library(kableExtra)
+
+```
+
+
+```{r capt, include=TRUE}
+
+df1<- readRDS(file = "DataPrimaires/df_consoj4548.rds")
+df2<- readRDS(file = "DataPrimaires/df_consoj49.rds")
+df3<- readRDS(file = "DataPrimaires/df_consoj5052.rds")
+df4<- readRDS(file = "DataPrimaires/df_consoj5355.rds")
+
+df<-rbind(df1,df2,df3,df4)
+
+df<-df %>% select(user_id,status_id,created_at,screen_name,text,quoted_text,quoted_status_id,source,display_text_width,is_quote,is_retweet,favorite_count,retweet_count,quote_count,reply_count, media_type, lang,  country, country_code, name,location, description, place_name,friends_count, followers_count,statuses_count,listed_count, favourites_count, account_created_at, verified,hashtags,mentions_screen_name)
+
+
+```
+
+# L'évolution quantitative des tweets
+
+On retrace ici la production des tweets, rt et comment d"heure en heure ce qui permet de capter les variations quotidiennes. On notera qu'en journée l'échantillon représente plusieurs milliers d'observations à l'heure ce qui assure une grande sensibilité des mesures. On utilise [ts_plot](https://cran.r-project.org/web/packages/TSstudio/vignettes/Plotting_Time_Series.html)
+
+```{r desc1}
+## plot time series of tweets
+ts_plot(df, "1 hours", color="darkblue") +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")) +
+  ggplot2::labs(
+    x = NULL, y = NULL,
+    title = "Fréquence des posts twitters sur #confinementjour",
+    subtitle = "Nombre de tweets par heure",
+    caption = "\nSource: Data collected by Benavent C. from Twitter's REST API via rtweet"
+  )+ scale_x_datetime(date_breaks = "1 day", labels = scales::label_date_short())
+
+
+```
+
+Une autre représentation de la série
+( correction à faire pour le jour)
+
+
+# Annotations
+
+L'analyse du sentiment peut se faire avec plusieurs outils, on en retient pour l'instant trois, auxquels d'autres devraient être ajoutés (emoji, )
+
+ * le NCR avec le package [syuzhet](https://cran.r-project.org/web/packages/syuzhet/vignettes/syuzhet-vignette.html)  On complète avec les émotions. 
+
+ * le #Liwc via quanteda et le dictionnaire en français.
+ * le lsdfr
+
+On en profite pour faire une analyse de fiabilité
+
+
+L'unité de temps est l'heure et la journée. 
+
+On se concentrera sur les tweets informatifs : les tweets originaux et les quotes, on élimine donc les retweets de l'analyse et de l'annotation. 
+
+Ultérieurement, il sera intéressant de comparer les deux sous corpus. Le premier reflète la production primaire et originale, de ceux assez engagés pour faire l'effort de produire un contenu. Le second reflète la propagation des idées diffusées dans par le premier et les préférences des utilisateurs moins engagés, les "transmetteurs". Ils ont le pouvoir de propager certains contenus audelà de leurs audiences immédiates et peuvent ainsi déformer la distribution des contenus, comme l'écho peut filtrer certains sons.
+
+```{r Senti01, include=TRUE}
+#Un contrôle pour les calculs intermédiaires  en échantillonnant.
+
+df<-df %>% filter(is_retweet==FALSE)
+
+## plot time series of tweets
+ts_plot(df, "2 hours", color="darkblue") +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")) +
+  ggplot2::labs(
+    x = NULL, y = NULL,
+    title = "Fréquence des posts twitters sur #confinementjour",
+    subtitle = "Nombre de tweets par 6 heures",
+    caption = "\nSource: Data collected by 'Labo du Confinement' from Twitter's REST API via rtweet"
+  )+ scale_x_datetime(date_breaks = "1 day", labels = scales::label_date_short())
+
+```
+
+
+## Méthode NRC
+
+On utilise le package [`syuzhet`]'(https://cran.r-project.org/web/packages/syuzhet/vignettes/syuzhet-vignette.html). La procédure est simple. On enrichit le fichier de données df de ces nouvelles annotations
+
+```{r Senti01b, eval = FALSE}
+#require(syuzhet)            
+#prend bcp de temps 
+#paramétres
+phrase<-as.character(df$text)
+words<- get_tokens(phrase, pattern = "\\W")
+
+#extraction
+my_text_values_french1<- get_nrc_sentiment(phrase, language="french")
+
+#ajout de la colonne sentiment au tableau de données général:
+sent<-as.data.frame(my_text_values_french1)
+
+library(kableExtra)
+#extrait du fichier
+kable(head(sent,5))
+
+#ajout
+df<-cbind(df,sent)
+
+#on sauvegarde pour réemploi ultérieur
+write_rds(df,"df_nrc4552.rds")
+```
+
+Une amélioration possible est la lemmatisation préalable du corpus qui devrait présenter un taux de reconnaissance plus élevé. C'est à tester de manière systématique
+
+
+## Methode liwc
+
+le LIWC dont il existe [deux versions 2007 et 2015](https://liwc.wpengine.com/compare-dictionaries/) permet d’obtenir d’autres indicateurs du sentiment, même s'il propose son propre calcul de positivité et de negativité qu'on va explité ne serait-ce que pour étblir la convergence avec l'indicateur NRC.
+
+Une partie des 80 indicateurs proposés est relatif à des dimensions topicales dont plusieurs groupes vont retenir notre attention dans la mesure où ils décrivent une partie de l’expérience relatée dans les commentaires. On retrouvera ici les [principales variables](https://www.kovcomp.co.uk/wordstat/LIWC.html) traduction en français voir ref
+
+La procédure pour extraire ces notions est fort simple, analogue à la précédente : on installe le dictionnaire LIWC et on utilise quanteda pour executer l'opération (`liwcalike`)
+
+```{r liwc01, eval = FALSE}
+# the devtools package needs to be installed for this to work
+devtools::install_github("kbenoit/quanteda.dictionaries")
+
+library("quanteda.dictionaries")
+dict_liwc_french <- dictionary(file = "FrenchLIWCDictionary.dic",
+                             format = "LIWC")
+test<-liwcalike(df$text,dictionary = dict_liwc_french)
+kable(head(test,5))
+
+df<-cbind(df,test)
+
+write_rds(df,"df_nrcliwc4552.rds")
+
+```
+
+Maintenant on analyse les données, plus de 80 colonnes se sont ajoutées à notre fichier.
+
+## Méthode lsd
+
+Lexicoder en français est du à @duval_analyse_2016. [voir aussi](https://www.poltext.org/fr/donnees-et-analyses/lexicoder). On utilise la version adaptée pour quanteda.
+
+```{r sent13,  eval = FALSE}
+dictfile <- tempfile()
+download.file("http://dimension.usherbrooke.ca/voute/frlsd.zip", dictfile, mode = "wb")
+unzip(dictfile, exdir = (td <- tempdir()))
+dic_ton <- dictionary(file = paste(td, "frlsd.cat", sep = "/"))
+df_senti<-df$text %>% tokens(what = "word", remove_numbers = TRUE, 
+                              remove_punct=TRUE, remove_symbols = TRUE,
+                              remove_separators = TRUE, remove_twitter = TRUE,
+                              remove_hyphens = FALSE, remove_url = TRUE, 
+                              ngrams = 1L)
+senti<-tokens_lookup(df_senti, dictionary = dic_ton, exclusive = FALSE)
+#head(senti,2)
+#Application du dictionnaire des sentiments: obtient l'occurence des termes positifs et des termes négatifs par commentaire
+analyseSentiments <- dfm(df_senti, dictionary = dic_ton)
+#Transformation en un data.frame avec transformation du nom des variables
+
+dfBaseSpecifique=data.frame(analyseSentiments,nb=ntoken(df_senti), id=rownames(df))
+dfBaseSpecifique<-dfBaseSpecifique %>% rename(Pos_lsdfr=POSITIVE, Neg_lsdfr=NEGATIVE)
+df_nrcliwclsd4555<-cbind(df,dfBaseSpecifique)
+write_rds(df_nrcliwclsd4555,"df_nrcliwclsd4555.rds")
+
+
+M<-subset(df_nrcliwclsd4555, select=c(anger, anticipation,disgust, fear, joy, sadness, surprise,trust, negative, positive,émopos,émonég,Pos_lsdfr,Neg_lsdfr))
+M <- cor(M)
+library(corrplot)
+corrplot.mixed(M, order="hclust")
+
+df_nrcliwclsd<- readRDS(file = "df_nrcliwclsd_cum44.rds") 
+
+df_nrcliwclsd4555<- readRDS(file = "df_nrcliwclsd4555.rds") 
+
+df_nrcliwclsd_cum55 <-rbind(df_nrcliwclsd, df_nrcliwclsd4555)
+write_rds(df_nrcliwclsd_cum55,"df_nrcliwclsd_cum55.rds")
+
+```
+
+
+
+
+
+
+## Méthodes sur mesure
+
+Si la notion de sentiment se rapporte à l'idée de valence (+/-) et que les instruments diffèrent par leurs dictionnaires, on peut être tenté d'en construire un propre au corpus et à ce que l'on souhaite observer. Mieux on peut généraliser l'idée en abandonnant la valence pour créer des indicateurs plus topicaux ( avec un index absence/présence). 
+
+Par exemple puisque la nourriture semble jouer un rôle important dans l'expérience de confinement, on peut annoter nos textes sur la base de la fréquence avec laquelle une liste de mots bien définis (au sens qu'ils permettent de cerner un concept) apparaissent dans le texte.
+
+
+```{r Senti03, include=TRUE,eval = FALSE}
+my_text <- df$text
+method <- "custom"
+custom_lexicon <- data.frame(word=c("course", "shopping", "queue", "masque","un mètre",
+                                    "distance sociale","commerce","supermarché","superette","marché",
+                                    "faire ses courses", "amazon", "employé","caissière", "carrefour", "leclerc",
+                                    "Intermarché", "franprix","monoprix", "drive","delivery" ),
+                             value=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1))
+custom_distrib <- get_sentiment(my_text, method = method, lexicon = custom_lexicon)
+
+custom_distrib<-as.data.frame(custom_distrib)
+ggplot(custom_distrib,aes(x=custom_distrib))+geom_histogram()+scale_y_log10()
+
+```
+
+```{r Senti03, include=TRUE,eval = FALSE}
+my_text <- df$text
+method <- "custom"
+custom_lexicon <- data.frame(word=c("sexe", "sexualité", "amour", "rencontre","drague","love"),
+                             value=c(1,1,1,1,1,1))
+custom_distrib <- get_sentiment(my_text, method = method, lexicon = custom_lexicon)
+
+custom_distrib<-as.data.frame(custom_distrib)
+ggplot(custom_distrib,aes(x=custom_distrib))+geom_histogram()+scale_y_log10()
+
+```
+
+
+Dans le cas du confinement, l'enjeu serait de caractériser l'expérience vécu. Ses facette principales sont a priori, mais l'analyse des études qualitatives proches de cette problématiques peuvent être utiles pour mieux en cerner les dimensions.
+
+Une analyse phénoménologique rapide en fait émerger quelques unes (à augmenter et mieux reclasser) :
+
+Comportement
+ * Travail :le travail qui soit se fait à distance soit dans des conditions de circulations fortement contraintes
+ * Education : S'occuper de la vie des enfants : écoles, aération, occupation, disputes....
+ * Socialité : Le rapport aux autres, des proches éloignés aux lointains rapprochés, amis, famille, collègues.
+ * Organique : Le soin du corps et la sexualité, l'organique.
+ * Logistique : l'approvisionnement et l'alimentation
+ * Sécurité : les gestes de protection et de distance sociale
+ 
+ Sentiment, émotions et états d'ames
+ * L'innoccupation et l'ennui
+ * La spatio-temporalité et la perte des repères (désorientation)
+ * La catharsis, la distanciation par l'humour et l'irone, la tentation du contrôle par l'information.
+ * Les émotions
+ 
+ Cognition
+
+ 
+## le traitement des emojis.
+
+ c'est une question essentielle mais résolue par [Sophie Balech](https://benaventc.github.io/BarometreConfinement/confinement02_emojis.html) .....
+
+## Approche via ML
+
+mais quelle variable à prédire? l'annotation manuelle est difficile, pas de note associée, seulement des mesures de succès (rt, reply), 
+
+
+## Références :

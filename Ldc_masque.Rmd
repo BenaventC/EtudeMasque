@@ -1,0 +1,248 @@
+---
+title: "masque
+author: "SB - MC - CB"
+date: "27 avril 2020"
+output:
+  html_document: default
+---
+[retour au repo](https://github.com/BenaventC/BarometreConfinement)
+
+![kelkin](kelkin.png)
+
+
+Ce script concerne la première phase de l'analyse, l'extraction des données réalisée @xxx  avec le package rtweet et l'API rest de twitter dans sa version open.
+
+
+
+## Les outils de l'analyse
+
+Le but de l'exercice est de mesurer le sentiment dans la période covid19 au travers des twits générés avec le hashtag #masque qui signale clairement l'intention de donner son sentiment, son humeur, sa pensée, son expérience. 
+
+L'outil principal est `rtweet`
+
+
+```{r setup, include=TRUE, echo=TRUE,message = FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE, cache=TRUE,  message = FALSE, warning=FALSE)
+library(tidyverse) #l'environnement de base : données et visus
+library(gridExtra) #associer des ggplot
+library(rtweet)
+library(tidyverse)
+library(tidytext)
+library(tidygraph)
+library(mixr)
+
+#devtools::install_github("lvaudor/mixr")
+library(widyr)
+library(knitr)
+library(topicmodels)
+library(lubridate)
+library(graphlayouts)
+library(proustr)
+library(widyr)
+library(ggraph)
+#memory.limit(size=64000)
+```
+
+## La collecte des données
+
+On utilise l'API de twitter via le package [`rtweet`](https://rtweet.info/articles/intro.html) pour aller chercher les tweets contenant le hashtag "confinementjour$" 
+
+Les limites de l'API free de twitter sont de 15000 requêtes par 15mn, on emploie donc le paramètre `retryonratelimit = TRUE` pour poursuivre la requête en supportant la latence. Celà représente facilement quelques heures de requêtage. On sauvegarde donc rapidement le résultat dans un fichier fixe, qu'on pourra rappeler plus tard pour analyse, avec la fonction `write_rds`.
+
+On commence à capturer les données le 9ème jour, puis chaque jour sur le jour de la veille pour couvrir la rémanence (les tweets #confinementjourj publié à j+1). La convention fixe par sa morphologie un ordre du temps. En principe on capture l'intégralité du flux.
+
+La boucle est opérationnelle si on ajoute, une série de hashtag dans le vecteur x. Mais la collecte étant réalisée quotidiennement sur le hashtag de la veille, la constitution du corpus se fait par des commandes manuelles. La concaténation reflète l'histoire des "jetés de filet".
+
+
+
+La compilation des données a été faite à la main, en fonction des collectes, la séquence reflète son histoire.
+
+```{r capt2, eval=FALSE}
+
+df1<-readRDS(file = "data/ok_df_masques02052020.rds")
+df2<-readRDS(file = "data/ok_df_masques03052020_2.rds")
+df3<-readRDS(file = "data/ok_df_masques04052020.rds")
+df4<-readRDS(file = "data/ok_df_masque05052020.rds")
+df5<-readRDS(file = "data/ok_df_masque06052020.rds")
+df6<-readRDS(file = "data/ok_df_masque07052020.rds")
+
+
+
+df<-rbind(df1,df2,df3,df4,df5,df6) %>% select(user_id,status_id,created_at,screen_name,text,quoted_text,quoted_status_id,source,display_text_width,is_quote,is_retweet,favorite_count,retweet_count,quote_count,reply_count, media_type, lang,  country, country_code, name,location, description, place_name,friends_count, followers_count,statuses_count,listed_count, favourites_count, account_created_at, verified,hashtags,mentions_screen_name)
+df_unique<-unique(df)
+write_rds(df,"data/df.rds")
+Masque<-df_unique %>% select(user_id,status_id,created_at,text,is_retweet,favourites_count,retweet_count,quote_count,reply_count)
+write.table(Masque,file="Masque.csv",sep=",")
+```
+
+# L' évolution quantitative des tweets collectés
+
+On retrace ici la production des tweets, rt et comment d"heure en heure ce qui permet de capter les variations quotidiennes. On notera qu'en journée l'échantillon représente plusieurs milliers d'observations à l'heure ce qui assure une grande sensibilité des mesures. On utilise [ts_plot](https://cran.r-project.org/web/packages/TSstudio/vignettes/Plotting_Time_Series.html)
+
+```{r desc2, fig.width=10}
+## plot time series of tweets
+ts_plot(df_unique, "1 hours", color="darkblue") +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")) +
+  ggplot2::labs(
+    x = NULL, y = NULL,
+    title = "Fréquence des posts twitters sur #masque/s",
+    subtitle = "Nombre de tweets par heure",
+    caption = "\nSource: Data collected by #laboratoireduConfinement from Twitter's REST API via rtweet"
+  )+  scale_x_datetime(date_breaks = "1 day", labels = scales::label_date_short())
+```
+
+ en distinguant tweets et rt.
+ 
+```{r desc3, fig.width=10}
+df %>% filter(created_at<as.Date("2020-05-10")) %>%
+  dplyr::group_by(is_retweet) %>%
+  ts_plot( "1 hours") +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold")) +
+  ggplot2::labs(
+    x = NULL, y = NULL,
+    title = "Fréquence des posts twitters sur #masque/s",
+    subtitle = "Nombre de tweets par heure",
+    caption = "\nSource: Data collected by #laboratoireduConfinement from Twitter's REST API via rtweet"
+  )+  scale_x_datetime(date_breaks = "1 day", labels = scales::label_date_short())
+
+ggsave(paste("ts.jpg"),width=12)
+
+```
+
+Ce qui conduit à examiner l'évolution du ratio tweet /retweet au cours du temps. On s'aperçoit que variation forte et ponctuelle, d'un rapport de base de 1 à 5 sont passse à des extrêmes de 1 à 10. Sans doute, mais c'est à vérifier, la conséquence de nouvelles marquantes.
+
+```{r desc1, fig.width=10}
+df$day<-as.numeric(format(df$created_at, "%d")) # jour
+#ggplot(df,aes(x=day))+geom_bar()+theme_minimal()
+df$month<-as.numeric(format(df$created_at, "%m")) # mois
+df$hour<-as.numeric(format(df$created_at, "%H")) # heure
+#ggplot(df,aes(x=hour))+geom_bar()+theme_minimal()
+df$year<-2020 # heure
+df$day2<-as.factor(df$day)
+
+foo<-df %>% group_by(month,day,hour) %>% mutate(n_rt=ifelse(is_retweet==TRUE,1,0),n_tw=ifelse(is_retweet==TRUE,0,1)) %>%summarise(n_rt=sum(n_rt),n_tw=sum(n_tw)) %>% mutate(rtrt=n_rt/n_tw)
+foo$date<-paste0("2020","-",foo$month,"-",foo$day," ",foo$hour,":00:00")
+foo$date2 <- as.POSIXct(strptime(foo$date, "%Y-%m-%d %H:%M:%S"))
+foo<-foo %>% filter(date2<as.Date("2020-05-10"))
+
+ggplot(foo,aes(x = date2,y=rtrt))+geom_line(color="firebrick")+theme_minimal()+labs(
+    x = "Jours", y = "Ratio rt/tweet ( à l'heure)",
+    title = " Evolution du ratio twit/retwet  sur #masqu",
+    caption = "\nSource: Data collected by #laboratoireduConfinement from Twitter's REST API via rtweet")+  scale_x_datetime(date_breaks = "1 day", labels = scales::label_date_short()) #+scale_y_log10()
+
+```
+
+[retour au repo](https://github.com/BenaventC/BarometreConfinement)
+
+
+
+
+
+# lecture des données
+
+```{r data , fig.width=9}
+
+#df <- readRDS("df_nrcliwclsd_cum55.rds")
+
+df$day<-as.numeric(format(df$created_at, "%d")) # jour
+df$month<-as.numeric(format(df$created_at, "%m")) # mois
+df$hour<-as.numeric(format(df$created_at, "%H")) # heure
+df$year<-2020 # heure
+df<- df %>% mutate(Jour=ifelse(month == 3,day-16 ,ifelse(month==4,day+15,ifelse(month==5,day+45,0))))
+
+df<-df %>% filter(created_at<as.Date("2020-05-10"))  %>% filter(is_retweet==FALSE)
+
+```
+
+```{r pos2, fig.width=9}
+
+lex_lm <- get_lexicon("fr")
+
+
+df_Tok <- df %>%
+  unnest_tokens(output = "Mots",
+                input = text,
+                token = "words",
+                collapse = F) %>%
+  anti_join(proust_stopwords(),by=c("Mots"="word"))
+
+df_Tok <- left_join(df_Tok,
+                    lex_lm,
+                    by=c("Mots"="word"))
+
+df_Tok_Fltr <- df_Tok %>%
+  select(user_id,Mots,lemma,type,Jour) %>%
+  filter(Mots != "masque") %>%
+   filter(type %in% c("nom","adj","ver")) 
+
+ggplot(df_Tok,aes(x=type))+geom_bar()+coord_flip()+theme_minimal()
+
+df_Tok_Fltr1 <- df_Tok_Fltr %>%
+  filter(lemma!= c("masque"))
+
+foo<-df_Tok_Fltr1 %>% mutate(n=1)%>% group_by(lemma) %>% summarise(frequence=sum(n)) %>% top_n(40, frequence)
+
+ggplot(foo, aes(x = reorder(lemma,frequence),y=frequence))+geom_point(stat="identity", color="darkblue")+coord_flip()+theme_minimal()+labs(title="Les 40 lemmes les plus fréquents",y="Lemmes")
+ggsave(paste("lemmes40.jpg"),width=12)
+
+foo<-df_Tok_Fltr1 %>% 
+  mutate(n=1)%>% 
+  group_by(Jour,lemma) %>% 
+  summarise(frequence=sum(n)) %>%
+  ungroup()  %>%
+  group_by(Jour) %>% 
+  arrange(Jour, desc(frequence), lemma) %>% 
+  mutate(ranking = row_number(),
+         Day = Jour) %>% as.data.frame() %>%filter(lemma=="distribution"|lemma=="stock"|lemma=="gouvernement"|lemma=="prix")
+
+col<-c('orange1','coral2','blue3','lightblue','paleturquoise4','darkcyan')
+ggplot(data = foo, aes(x = Jour, y = ranking, group = lemma)) +
+  geom_line(aes(color = lemma), size =1.32)+
+  theme_minimal()+scale_color_manual(values=col)+scale_y_log10() +labs(title ="Evolution du ranking des lemmes")+xlim(40,55) #scale_y_reverse(breaks = 1:nrow(foo))
+
+
+ggsave(paste("acteurscles.jpg"),width=12)
+
+```
+
+
+
+## La boucle pour produire les réseaux quotidiens
+
+la boucle du jour1 au journ : 3 opérations
+cooccurences
+fichier network
+representations
+
+```{r Cooc1-17, fig.width=12}
+
+
+
+
+
+df_Day <- df_Tok_Fltr1
+cooc <- df_Day %>%
+  pairwise_count(lemma, feature = user_id,sort=T) 
+
+cooc2 <- cooc %>%
+  filter(n > 80)
+
+mots_graph <- igraph::graph_from_data_frame(cooc2)
+graph <- as_tbl_graph(mots_graph) %>% 
+    mutate(Popularity = centrality_degree(mode = 'in')) #%>%  mutate(group = group_spinglass())
+
+my_graph <- graph %>% 
+   ggraph::ggraph(layout = "fr") +
+   ggraph::geom_edge_link(edge_colour="lightgray",edge_alpha=.3,aes(size = n)) +
+   ggraph::geom_node_point(aes(size = Popularity)) + #,color=factor(group)
+   ggraph::geom_node_text(aes(label = name), repel = TRUE, cex=3) +
+   ggplot2::theme_void() + 
+   labs(title = paste("masque",": "))
+
+plot(my_graph)
+ggsave(paste("Jour",".jpg"))
+
+
+```

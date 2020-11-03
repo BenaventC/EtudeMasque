@@ -1,0 +1,940 @@
+---
+title: "La validité des indicateurs de sentiment - le cas des données covid"
+subtitle: "Annotations du sentiment"
+author: "CB"
+date: "12 août 2020"
+output: html_document
+---
+
+# Packages utilisés
+
+```{r setup, include=FALSE, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE,include=TRUE, cache=TRUE, message=FALSE,warning=FALSE)
+library(tidyverse) #l'environnement de base : données et visus
+library(reshape2)
+library(gridExtra) #associer des ggplot
+library(ggrepel) #pour une belle labelisation des xy
+library(igraph) #pour l'analyse de réseau
+library(scales) #pour les échelles de temps et de date
+library(syuzhet)     # ncr      
+library(tm)
+library(quanteda) #with quanteda
+library(kableExtra)
+library(stringi)
+library(scales) #pour les échelles de temps et de date
+library(ineq)
+library(gglorenz)
+library(ggridges)
+library(rtweet)
+library(RcppRoll)
+library(sjPlot)
+library(pscl)
+library(stargazer)
+```
+
+
+# les données
+
+```{r file}
+df_user<-readRDS("df_nrc.rds")
+```
+
+
+
+# Segmenter le corpus selon l'activité des twittos originaux
+
+Ultérieurement, il sera intéressant de comparer les deux sous corpus. Le premier reflète la production primaire et originale, de ceux assez engagés pour faire l'effort de produire un contenu. Le second reflète la propagation des idées diffusées dans par le premier et les préférences des utilisateurs moins engagés, les "transmetteurs". Ils ont le pouvoir de propager certains contenus audelà de leurs audiences immédiates et peuvent ainsi déformer la distribution des contenus, comme l'écho peut filtrer certains sons.
+
+
+```{r prod}
+
+#on calcule le nombre de tweets par twittos
+twittos<-df %>% 
+  mutate(n=1) %>% 
+  group_by(user_screen_name) %>% 
+  summarise(nb_tweetso = sum(n))
+mean<-round(mean(twittos$nb_tweetso),1)
+median<-median(twittos$nb_tweetso)
+max<- max(twittos$nb_tweetso)
+
+g01<-ggplot(twittos, aes(x=nb_tweetso))+
+  geom_histogram(binwidth=1,fill="royalblue1")+
+  theme_minimal()+
+  xlim(0,200)+
+  labs(x = "Nombre de tweets par twittos",y = "Fréquence",
+         title = "Distribution des posts (tweet,reply, quote)", 
+       subtitle =paste0("nombre max=",max, " - médiane = ", median))+
+  scale_y_log10(labels = comma)
+
+#on analyse la concentration
+#library(ineq)
+#library(gglorenz)
+gini<-round(ineq(twittos$nb_tweetso,type = c("Gini")),3)
+
+gini
+g02<-twittos %>%
+    ggplot(aes(nb_tweetso)) +
+    stat_lorenz(desc = TRUE,size=1.2,color="royalblue4") +
+    coord_fixed() +
+    geom_abline(linetype = "dashed") +
+    theme_minimal() +labs(x = "Proportion cumulée des twittos",
+         y = "Proportion cumulée des posts",
+         title = "Concentration des posts ",subtitle =paste0("indice de Gini=",gini),
+         caption = "data : Banda et al (2020)")
+
+grid.arrange(g01,g02,ncol=2)
+```
+
+```{r prod2}
+
+col =c("deepskyblue4","chartreuse4","gold3","firebrick3")
+
+twittos<-twittos %>% mutate(Twittos=ifelse(nb_tweetso==1,"Ponctuels", 
+                                 ifelse(nb_tweetso>1 & nb_tweetso<7, "Récidivistes", 
+                                 ifelse(nb_tweetso>6 & nb_tweetso<30,"Fidèles","Superposteurs"))))
+
+twittos$Twittos<- factor(twittos$Twittos,ordered=TRUE,levels=c("Ponctuels","Récidivistes","Fidèles","Superposteurs"))
+table(twittos$Twittos)
+
+g10<-ggplot(twittos,aes(x=Twittos,y = (..count.. / sum(..count..)),fill=Twittos))+
+  geom_bar(position = "stack")+theme_minimal()+
+  coord_flip()+
+  scale_fill_manual(values =col)+ 
+  theme(legend.position = "none")+  
+  labs(title="Part des tweetos (n=227 964)",x="Twittos",y="proportion")  
+
+
+df_user <-df %>%left_join(twittos,by="user_screen_name")%>%mutate(n_tweets=1)                                 
+
+g11<-ggplot(df_user,aes(x=Twittos, y = ..count.. / sum(..count..),fill=Twittos))  +
+  geom_bar() +theme_minimal()+coord_flip()+
+  scale_fill_manual(values =col) + theme(legend.position = "none")+
+  labs(title="Part des posts ( n= 526 662)", x=NULL,y="proportion")  
+
+grid.arrange(g10,g11,ncol=2)     
+ggsave("gg1.jpg",plot=grid.arrange(g10,g11,ncol=2), width =16, height=11,units="cm"  )
+
+```
+
+# Analyse du sentiment - niveau des textes
+
+## Corrélations des indicateurs bruts
+
+```{r sent13,  eval = TRUE}
+M<-subset(df_user, select=c(negative, positive,émopos,émonég,lsdfr_positive,lsdfr_negative))
+M <- cor(M)
+library(corrplot)
+corrplot.mixed(M, order="hclust")
+
+```
+
+## Corrélation des indicateurs
+
+On retient le ratio (Sentiment/Nombre de mots) pour les analyses en gardant à l'esprit qu'une conception bi fatorielle est envisageable
+
+```{r indicateur}
+df_user$day<-as.numeric(format(df_user$parsed_created_at, "%d")) # jour
+df_user$month<-as.numeric(format(df_user$parsed_created_at, "%m")) # mois
+df_user$hour<-as.numeric(format(df_user$parsed_created_at, "%H")) # heure
+df_user$Year<-2020 # heure
+df_user<-df_user %>% mutate(n_word=lengths(strsplit(text, "\\W+")) ,
+                        nrc_positif=positive*100/n_word, 
+                        nrc_negatif =negative*100/n_word,
+#                        liwc_positif=émopos,
+#                        liwc_negatif=émonég,
+#                        lsdfr_positif=lsdfr_positive*100/n_word,
+#                        lsdfr_negatif=lsdfr_negative*100/n_word,
+                        nrc_valence=nrc_positif-nrc_negatif,
+#                        liwc_valence=liwc_positif-liwc_negatif,
+#                        lsdfr_valence=lsdfr_positif-lsdfr_negatif,
+                        nrc_expressivity=nrc_positif+nrc_negatif,
+#                        liwc_expressivity=liwc_positif+liwc_negatif,
+#                        lsdfr_expressivity=lsdfr_positif+lsdfr_negatif,
+)
+df_user$nrc_positif_l<-log(df_user$nrc_positif+1)
+ggplot(df_user,aes(x=nrc_positif_l))+geom_histogram()
+```
+
+On retrouve la même structure, légèrement amplifiée. 
+```{r indicateur2,  eval = TRUE}
+M<-subset(df_user, select=c(nrc_positif, nrc_negatif,liwc_positif,liwc_negatif,lsdfr_positif,lsdfr_negatif))
+M <- cor(M)
+library(corrplot)
+corrplot.mixed(M, order="hclust")
+
+```
+
+diagramme ternaire
+permet de mieux se rendre compte quela bande inférieure est vide : il n'y quasi aucun tweet à 100% d'expressif , la grande majorité est audessus de 0.5, donc moins expressifs .
+
+L'axe vertical : expressivité
+axe horizontal : valence.
+```{r indicateur3,  eval = TRUE}
+foo<-df_user  %>% mutate(nrc_neutre=(1-nrc_positif -nrc_negatif)) %>% select(nrc_positif,nrc_negatif, nrc_neutre)%>%sample_n(100000)
+
+ggplot(df_user,aes(x=nrc_valence,y=nrc_expressivity))+ geom_point()+ geom_density2d()+theme_minimal()
+
+```
+# le sentiment des catégories de twittos
+
+Une évolution consistante 
+```{r comp01}
+df_userb<-df_user %>% select(id, text,nrc_valence, nrc_expressivity, Twittos, month,media,urls)
+df_userb$media<- as.factor(df_userb$media)
+df_userb$mois<-as.factor(df_userb$month)
+
+foo<-df_userb %>% group_by(mois,Twittos) %>% 
+  summarise(nrc_valence= mean(nrc_valence,nar.rm=TRUE), nrc_expressivity=mean(nrc_expressivity,nar.rm=TRUE))
+foo<-melt(foo, by=c(Twittos, mois))
+
+library(flextable )
+library(jtools)
+library(kableExtra)
+
+g11<-ggplot(foo,aes(x=mois, y = value,group=Twittos))  +
+  geom_line(stat="identity", aes(color=Twittos), size=2) +theme_minimal()+
+  labs(title="Valence et expressivité", y="Valeur") +facet_wrap(vars(variable),scale="free") 
+g11
+
+
+fit<- lm(nrc_valence~mois+Twittos, data=df_user)
+names(fit$coefficients) <- c('Intercept','Février','Mars,','Avril','Mai', 'récidiviste', 'fidèle', 'superposteurs')
+
+summ(fit)
+
+fit<- lm(nrc_expressivity~mois+Twittos, data=df_user)
+names(fit$coefficients) <- c('Intercept','Février','Mars,','Avril','Mai', 'récidiviste', 'fidèle', 'superposteurs')
+
+summ(fit)
+```
+
+Les évolution sont parallèles. Quand il y a un media la valence est moins négative, et le contenu est moins expressif : le sentùent est dans l'image
+
+
+```{r comp02}
+
+foo<-df_userb %>% group_by(mois,media) %>% 
+  summarise(nrc_valence= mean(nrc_valence,nar.rm=TRUE), nrc_expressivity=mean(nrc_expressivity,nar.rm=TRUE))
+foo<-melt(foo, by=c(media, mois))
+
+g11<-ggplot(foo,aes(x=mois, y = value,group=media))  +
+  geom_line(stat="identity", aes(color=media), size=2) +theme_minimal()+
+  labs(title="Valence et expressivité", y="Valeur") +facet_wrap(vars(variable),scale="free") 
+g11
+
+
+```
+
+Les évolution sont parallèles. Quand il y a un media la valence est moins négative, et le contenu est moins expressif : le sentùent est dans l'image
+
+
+```{r comp02}
+
+foo<-df_userb %>% group_by(mois,urls) %>% 
+  summarise(nrc_valence= mean(nrc_valence,nar.rm=TRUE), nrc_expressivity=mean(nrc_expressivity,nar.rm=TRUE))
+foo<-melt(foo, by=c(urls, mois))
+
+g11<-ggplot(foo,aes(x=mois, y = value,group=urls))  +
+  geom_line(stat="identity", aes(color=urls), size=2) +theme_minimal()+
+  labs(title="Valence et expressivité", y="Valeur") +facet_wrap(vars(variable),scale="free")
+g11
+
+
+```
+
+# Evolution quotidienne des indicateurs
+
+C'est l'unité qui semble à la fois couvrir plusieurs centaines d'observation au moin, et de présenter une validité exitantielle : le jour elle le rythme du flux. 
+
+```{r corr01}
+sentevol<-df_user %>% 
+  group_by(Year,month,day) %>% mutate(n=1) %>%  
+  summarise(nrc_positif=mean(nrc_positif,na.rm=TRUE),
+            nrc_negatif=mean(nrc_negatif, na.rm=TRUE), 
+            liwc_positif=mean(liwc_positif, na.rm=TRUE),
+            liwc_negatif=mean(liwc_negatif, na.rm=TRUE),
+            lsdfr_positif=mean(lsdfr_positif, na.rm=TRUE),
+            lsdfr_negatif=mean(lsdfr_negatif, na.rm=TRUE),
+            nrc_valence=mean(nrc_valence, na.rm=TRUE),
+            liwc_valence=mean(liwc_valence, na.rm=TRUE),
+            lsdfr_valence=mean(lsdfr_valence, na.rm=TRUE),
+            nrc_expressivity=mean(nrc_expressivity, na.rm=TRUE),
+            liwc_expressivity=mean(liwc_expressivity, na.rm=TRUE),
+            lsdfr_expressivity=mean(lsdfr_expressivity, na.rm=TRUE),
+            n=sum(n)) %>% ungroup()
+
+M<-sentevol %>% select(nrc_positif,nrc_negatif,liwc_positif,liwc_negatif, lsdfr_positif, lsdfr_negatif)
+M<-as.matrix(cor(M))
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(M, method="number", order="hclust",
+         type="lower" , title="correlation des traits et des méthodes"  )
+
+```
+
+Les relations positifs et négatifs
+
+```{r corr02}
+
+gs4<-ggplot(sentevol, aes(x=nrc_negatif, y=nrc_positif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title="positifs et négatifs - nrc")
+gs5<-ggplot(sentevol, aes(x=liwc_negatif, y=liwc_positif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title=" - liwc")
+gs6<-ggplot(sentevol, aes(x=lsdfr_negatif, y=lsdfr_positif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title=" - lsdfr")
+grid.arrange(gs4,gs5,gs6, ncol=3)
+
+```
+
+les relation positif positif
+
+
+```{r corr02}
+
+gs4<-ggplot(sentevol, aes(x=nrc_negatif, y=liwc_negatif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title="positifs et négatifs - nrc")
+gs5<-ggplot(sentevol, aes(x=liwc_negatif, y=lsdfr_negatif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title=" - liwc")
+gs6<-ggplot(sentevol, aes(x=lsdfr_negatif, y=nrc_negatif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title=" - lsdfr")
+grid.arrange(gs4,gs5,gs6, ncol=3)
+
+```
+
+```{r corr02}
+
+gs4<-ggplot(sentevol, aes(x=nrc_positif, y=liwc_positif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title="positifs et négatifs - nrc")
+gs5<-ggplot(sentevol, aes(x=liwc_positif, y=lsdfr_positif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title=" - liwc")
+gs6<-ggplot(sentevol, aes(x=lsdfr_positif, y=nrc_positif))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title=" - lsdfr")
+grid.arrange(gs4,gs5,gs6, ncol=3)
+
+```
+
+## valence
+
+```{r corr2, fig.height=10, fig.width=12}
+
+sentevol$date<-paste0("2020","-",sentevol$month,"-",sentevol$day)
+sentevol$date2 <- as.POSIXct(strptime(sentevol$date, "%Y-%m-%d"))
+
+foo<-sentevol %>% select(date2, nrc_positif,nrc_negatif,liwc_positif,liwc_negatif,lsdfr_positif,lsdfr_negatif)
+foo<-melt(foo, id=c("date2"))
+foo<-foo %>% mutate(Instrument=substr(variable,1,3))%>%
+  mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+
+ggplot(foo, aes(x=date2,y=value2,group=variable))+
+  geom_line(size=1,aes(color=variable))+
+  stat_smooth( aes(color =variable),  method = "gam", size=2)+  
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  facet_wrap(vars(Instrument),ncol = 3)+
+  scale_color_manual(values=c("Chartreuse1","firebrick1", "Chartreuse2",  "firebrick2","Chartreuse4",  "firebrick4"))+
+  labs(title) + theme_minimal()
+```
+
+un pb de regex à regler
+
+
+```{r corr2, fig.height=10, fig.width=12}
+
+sentevol$date<-paste0("2020","-",sentevol$month,"-",sentevol$day)
+sentevol$date2 <- as.POSIXct(strptime(sentevol$date, "%Y-%m-%d"))
+
+foo<-sentevol %>% select(date2, nrc_valence,nrc_expressivity,liwc_valence,liwc_expressivity,lsdfr_valence,lsdfr_expressivity)
+foo<-melt(foo, id=c("date2"))
+foo<-foo %>% mutate(Instrument=substr(variable,1,3), trait=str_extract(variable,"^_[a-zA-Z0-9]{3}"))%>%
+  mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+foo$Instrument<-as.factor(foo$Instrument)
+
+ggplot(foo, aes(x=date2,y=value2,group=Instrument))+
+  geom_line(size=1,aes(color=Instrument))+
+  stat_smooth( aes(color =Instrument),  method = "gam", size=2)+  
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  facet_wrap(vars(trait),ncol = 3)+
+  scale_color_manual(values=c("Chartreuse1","firebrick1", "Chartreuse2",  "firebrick2","Chartreuse4",  "firebrick4"))+
+  labs(title) + theme_minimal()
+```
+
+# Avec les segments
+
+en distinguant les posteurs
+
+```{r corr3}
+
+foo<-sentevol %>% select(date2, nrc_valence,liwc_valence, lsdfr_valence)
+foo<-melt(foo, id=c("date2"))%>%mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+
+ggplot(foo, aes(x=date2,y=value2,group=variable))+
+  geom_line(size=1,aes(color=variable))+
+  theme(axis.text.x=element_text(angle = 60, vjust = 0.5))+ 
+  theme_minimal()+ stat_smooth( aes(color =variable),  method = "gam")+
+  labs(x = NULL, y = NULL,
+    title = "Evolution de la valence du sentiment du confinement", y="Valence (+/-)",x="dates (par jour)",
+    subtitle = "Valence par jour",
+    caption = "\nSource: Data covid19 rehydrated" )+
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .5, angle = 00))+
+  theme_minimal()+scale_color_manual(values=c("royalblue1","royalblue4", "Chartreuse4",  "firebrick3"))
+
+gs7<-ggplot(sentevol, aes(x=liwc_valence, y=nrc_valence))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title="Corrélation des valences")
+
+gs8<-ggplot(sentevol, aes(x=liwc_valence, y=lsdfr_valence))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title="Corrélation des valences")
+gs9<-ggplot(sentevol, aes(x=nrc_valence, y=lsdfr_valence))+geom_point()+geom_smooth(method = "lm")+theme_minimal()+labs(title="Corrélation des valences")
+grid.arrange(gs7,gs8,gs9, ncol=3)
+
+```
+
+On observe pour les trois instruments un rapprochement de l'opinion des twittos occasionnels et des plus systématiques. Convergence des normes?
+
+```{r temp3}
+#df_user<-df_user[,1:106]
+df_user$day<-as.numeric(format(df_user$parsed_created_at, "%d")) # jour
+df_user$month<-as.numeric(format(df_user$parsed_created_at, "%m")) # mois
+df_user$hour<-as.numeric(format(df_user$parsed_created_at, "%H")) # heure
+df_user$Year<-2020 # heure
+
+sentevolg<-df_user  %>% 
+  group_by(Twittos,Year,month,day) %>% mutate(n=1) %>%  
+  summarise(nrc_positif=mean(nrc_positif,na.rm=TRUE),
+            nrc_negatif=mean(nrc_negatif, na.rm=TRUE), 
+ #           liwc_positif=mean(liwc_positif, na.rm=TRUE),
+#            liwc_negatif=mean(liwc_negatif, na.rm=TRUE),
+#            lsdfr_positif=mean(lsdfr_positif, na.rm=TRUE),
+#            lsdfr_negatif=mean(lsdfr_negatif, na.rm=TRUE),
+            nrc_valence=mean(nrc_valence, na.rm=TRUE),
+#            liwc_valence=mean(liwc_valence, na.rm=TRUE),
+#            lsdfr_valence=mean(lsdfr_valence, na.rm=TRUE),
+            nrc_expressivity=mean(nrc_expressivity, na.rm=TRUE),
+#            liwc_expressivity=mean(liwc_expressivity, na.rm=TRUE),
+#            lsdfr_expressivity=mean(lsdfr_expressivity, na.rm=TRUE),
+            n=sum(n)) %>% ungroup()
+
+library(RcppRoll)
+sentevolg$date<-paste0("2020","-",sentevolg$month,"-",sentevolg$day)
+sentevolg$date2 <- as.POSIXct(strptime(sentevolg$date, "%Y-%m-%d"))
+#un simple nrc
+
+foo<-sentevolg%>%select(date2, Twittos, nrc_valence,nrc_expressivity)
+foo<-melt(foo, id=c("date2", "Twittos"))
+foo<- foo %>% group_by(Twittos,variable)%>% 
+  mutate(value2=roll_mean(value,10,na.rm = TRUE, fill=NA))
+
+col =c("deepskyblue4","chartreuse4","gold3","firebrick3")
+
+variable_names <- list(
+  "nrc_valence" = "Valence du sentiment" ,
+  "nrc_expressivity" = "Expressivité du sentiment"
+)
+
+
+variable_labeller <- function(variable,value){
+  return(variable_names[value])
+}
+
+
+gg<-ggplot(foo, aes(x=date2,y=value2,group=Twittos))+
+  geom_line(size=1.2,aes(color=Twittos))+
+  theme_minimal()+ 
+# stat_smooth( aes(color =Twittos),  method = "loess")+
+  labs(x = NULL, y = NULL,
+    title = "Evolution de la valence du sentiment des tweets du confinement", 
+    subtitle = "Valence par jour - méthode NRC - \nles barres verticale indiquent le début du confinement et du déconfinement",
+    caption = "\nData: Banda et al,2020" )+
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  theme_minimal()+
+  scale_color_manual(values =col) +
+  geom_vline(xintercept = as.POSIXct("2020-03-17",format="%Y-%m-%d"), linetype="solid",color = "grey40", size=3)+
+    geom_vline(xintercept = as.POSIXct("2020-05-11",format="%Y-%m-%d"), linetype="solid",color = "grey80", size=3)+
+  facet_wrap(vars(variable), ncol=1,scales = "free", labeller=variable_labeller )
+ggsave("gg.jpg",plot=gg,width =20, height=16,units="cm"  )
+```
+
+les autres mesurres
+
+```{r temp3b, fig.height=10}
+
+#### les 3 methode positif
+foo<-sentevolg%>%select(date2, Twittos, nrc_positif,liwc_positif, lsdfr_positif)
+foo<-melt(foo, id=c("date2", "Twittos"))
+foo<- foo %>% group_by(Twittos)%>% mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+
+ggplot(foo, aes(x=date2,y=value2,group=Twittos))+
+  geom_line(size=1,aes(color=Twittos))+
+  theme_minimal()+ 
+# stat_smooth( aes(color =Twittos),  method = "loess")+
+  labs(x = NULL, y = NULL,
+    title = "Evolution de la positivité du sentiment du confinement", 
+    subtitle = "Valence par jour",
+    caption = "\nSource: Data covid19 rehydrated" )+
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  theme_minimal()+scale_color_manual(values=c("royalblue3","Chartreuse4","firebrick3","orange2"))+facet_wrap(vars(variable),nrow = 3)
+
+foo<-sentevolg%>%select(date2, Twittos, nrc_negatif,liwc_negatif, lsdfr_negatif)
+foo<-melt(foo, id=c("date2", "Twittos"))
+foo<- foo %>% group_by(Twittos)%>% mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+
+ggplot(foo, aes(x=date2,y=value2,group=Twittos))+
+  geom_line(size=1,aes(color=Twittos))+
+  theme_minimal()+ 
+# stat_smooth( aes(color =Twittos),  method = "loess")+
+  labs(x = NULL, y = NULL,
+    title = "Evolution de la négativité du sentiment du confinement", 
+    subtitle = "Valence par jour",
+    caption = "\nSource: Data covid19 rehydrated" )+
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  theme_minimal()+scale_color_manual(values=c("royalblue3","Chartreuse4","firebrick3","orange2"))+facet_wrap(vars(variable),nrow = 3)
+
+foo<-sentevolg%>%select(date2, Twittos, nrc_valence,liwc_valence, lsdfr_valence)
+foo<-melt(foo, id=c("date2", "Twittos"))
+foo<- foo %>% group_by(Twittos)%>% mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+
+ggplot(foo, aes(x=date2,y=value2,group=Twittos))+
+  geom_line(size=1,aes(color=Twittos))+
+  theme_minimal()+ 
+# stat_smooth( aes(color =Twittos),  method = "loess")+
+  labs(x = NULL, y = NULL,
+    title = "Evolution de la valence du sentiment du confinement", 
+    subtitle = "Valence par jour",
+    caption = "\nSource: Data covid19 rehydrated" )+
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  theme_minimal()+scale_color_manual(values=c("royalblue3","Chartreuse4","firebrick3","orange2"))+facet_wrap(vars(variable),nrow = 3)
+
+foo<-sentevolg%>%select(date2, Twittos, nrc_expressivity,liwc_expressivity, lsdfr_expressivity)
+foo<-melt(foo, id=c("date2", "Twittos"))
+foo<- foo %>% group_by(Twittos)%>% mutate(value2=roll_mean(value,7,na.rm = TRUE, fill=NA))
+
+ggplot(foo, aes(x=date2,y=value2,group=Twittos))+
+  geom_line(size=1,aes(color=Twittos))+
+  theme_minimal()+ 
+# stat_smooth( aes(color =Twittos),  method = "loess")+
+  labs(x = NULL, y = NULL,
+    title = "Evolution de l'expressivité du sentiment du confinement", 
+    subtitle = "Valence par jour",
+    caption = "\nSource: Data covid19 rehydrated" )+
+  scale_x_datetime(date_breaks = "1 week",minor_breaks=NULL, labels = scales::label_date_short())+ 
+  theme(axis.title.x = element_text(size = .4, angle = 90))+
+  theme_minimal()+scale_color_manual(values=c("royalblue3","Chartreuse4","firebrick3","orange2"))+facet_wrap(vars(variable),nrow = 3)
+
+```
+
+
+
+on doit donc avoir l'évolution par segment de twittos et par segment de à popularité des messages. 
+
+
+#analyse de convergence des indicateurs
+
+Un problème est celui de la fiabilité et de la validité des indicateurs de sentiments. Si on en dispose de pplusiers on peut s'intérooger sur leur convergence : sont-ils suffisemment corrélés? Décrivent-ils bien ce qu'ils doivent décrire? C'est cette étude que nous allons entreprendre en nous inspirant du cadre méthodologique de la constructions des échelles. 
+
+## corrélations
+## fa
+## alphe
+## mtmm
+
+# sentiment et performance
+
+Le sentiment est supposé expliquer certaine variable et notamment le succès du tweet qu'on approche par deux variables : le nombre de retwett et le nombre de favori.
+
+On va tester d'abord l'effet trivial du nombre de follower en efft de manière évidente plus on est suivi et plus de personnes sont exposés par nos tweets. De manière similaire on inclus le nombre d'amis, c'ets à dire le nombre de personne que l'on suit.  Ces deux variables caratérisent la position social : les hub et les authorités ( on ajoutera le nombre de post émis). On s'attend à des effets d'interactions puisqu'en effet quelqu'un suivi par moins de personne qu'il suit emet un signal de faible qualité au contraire de celui qui a un nombre de suiveurs bcp plus grand que ceux qu'ils suivent.
+
+On ajoute deux variables : la présence d'un media ou d'une url qui caractérisent le contenu du message. Enfin on en introduit la tonalité en jouant des effets d'interactions des sentiments négatifs et positifs.
+
+Avant de modéliser examinons les caractéristiques de nos variables
+
+## le succès 
+
+deux indicateurs capture bien la popularité : le nombre de favoris et le nombre de retweet. Le second demande un niveau d'engagement plus élevé, le premier peut aussi bien témoigner l'approbation que le soutien.
+
+Les deux indicateurs sont distribués de manière très inégales avec des coef de gini de 0.95 : autrement dit dans les deux cas on est dans un ordre de grandeur tels que moins de 10% des tweets rassemble près de 95% des favoris et des retweets. L'inégalité est presque absolue. On peut l'expliquer par un processus d'attachement. La durée de vie d'un tweets sur les fils des lecteurs, dépend naturellement du nombre d'amis qu'ils suivent : plus on en a et moins on a de chance de les voir. Les tweets qui ne sont pas vus disparaissent donc très vite ( en quelques heures) de la vue des lecteurs, sauf s'ils sont retweetés ou liker, ce qui prolonge leur durée de vie en plus d'étendre le nombre de personnes potentiellement exposées. Cet effet se multiplie avec celui de la taille du public (le nombre de followers), plus elle est importante et plus grandes seront les chances d'être favorisé ou retweeté. 
+
+Le plus aimé à été favorisé 39000 fois sur un total de 2 millions de like. Nous avons 270 000 tweets, ce recordman à lui seul représente 2% du total.
+
+On remarque la surprésentation de zero, 66% et 70% qui portera à adopter un modèle zero-inflated de poisson dont l'intéreêt est de modèleiser de manière distinctes. 
+
+
+```{r modele0}
+library(viridis)
+
+df_user$favorite_count<-as.numeric(df_user$favorite_count)
+df_user$retweet_count<-as.numeric(df_user$retweet_count)
+
+Max1<-max(df_user$favorite_count)
+total1<-sum(df_user$favorite_count)
+gm01a<-ggplot(df_user,aes(x=favorite_count+1))+geom_histogram(binwidth = 10, fill="chartreuse4" )+xlim(-1,1000)+ theme_minimal()+
+  scale_y_log10()+labs(x = "Nombre de favoris",
+         y = "échelle log10",
+         title = "Distribution des favoris",subtitle =paste0("max=",Max1))
+Max2<-max(df_user$retweet_count)
+
+gm01b<-ggplot(df_user,aes(x=retweet_count))+
+  geom_histogram(binwidth = 10, fill="chartreuse4")+
+  xlim(-1,1000)+theme_minimal()+scale_y_log10()+scale_y_log10()+labs(x = "Nombre de favoris",
+         y = "échelle log10", x=" nombre de retweet , tronqué à 1000",
+         title = "Distribution des retweets",subtitle =paste0("max=",Max2))
+
+grid.arrange(gm01a,gm01b,ncol=2)
+
+#df_user$score=df_user$favorite_count/(df_user$retweet_count+1)
+gini1<-round(ineq(df_user$favorite_count,type = c("Gini")),2)
+gm01c<-df_user %>%
+    ggplot(aes(favorite_count)) +
+    stat_lorenz(desc = TRUE,size=1.2,color="darkred") +
+    coord_fixed() +
+    geom_abline(linetype = "dashed") +
+    theme_minimal() +labs(x = "Part cumulée des tweets",
+         y = "Part cumulée des retweets",
+         title = "Concentration des tweets",subtitle =paste0("indice de Gini=",gini1),
+         caption = "")
+
+gini2<-round(ineq(df_user$retweet_count,type = c("Gini")),2)
+gm01d<-df_user %>%
+    ggplot(aes(retweet_count)) +
+    stat_lorenz(desc = TRUE,size=1.2,color="darkred") +
+    coord_fixed() +
+    geom_abline(linetype = "dashed") +
+    theme_minimal() +labs(x = "Part cumulée des tweets",
+         y = "Part cumulée des retweets",
+         title = "Concentration des tweets",subtitle =paste0("indice de Gini=",gini2),
+         caption = "")
+
+grid.arrange(gm01c,gm01d,ncol=2)
+
+
+```
+
+## Les variables indépendantes
+
+### la position sociale de l'auteur du tweet
+
+Il y a de forte chance que la popularité du compte soit le premier facteurs du succès qui peut être opératiionnaliser sous la forme du nombre de followers.
+
+On tient compte aussi du nombre de compte suivi qui comprend des followers, et peut indiquer des jeux de réciprocité. 
+
+```{r modele1}
+
+df_user$user_followers_count<-as.numeric(df_user$user_followers_count)
+df_user$user_friends_count<-as.numeric(df_user$user_friends_count)
+
+gm01<-ggplot(df_user,aes(x=user_followers_count))+geom_histogram(binwidth = 1 )+xlim(-1,500)+theme_minimal()
+gm02<-ggplot(df_user,aes(x=user_friends_count))+geom_histogram(binwidth = 1)+xlim(-1,500)+theme_minimal()
+grid.arrange(gm01,gm02,ncol=2)
+```
+
+
+http://eric.univ-lyon2.fr/~ricco/tanagra/fichiers/fr_Tanagra_ZIP_Regression_R_Python.pdf_user
+
+On remarque qu'une tranformation logarithmique ( ici de 10 pour garder des rapport lisible de'ordre de grandeur : une unité supllémentaire signant 10 fois plus d'unités élémentaires), la distribution conjointe fait apparaitre une forte corrélation.
+
+```{r modele2}
+
+df_user_mod<-df_user %>% 
+  mutate(user_verified==ifelse(user_verified=="True","True", "not-True"),
+         user_followers_count=ifelse(user_followers_count==0,0,log10(user_followers_count+1)),
+         user_friends_count=ifelse(user_friends_count==0,0,log10(user_friends_count+1)),
+         user_friends_count=ifelse(user_friends_count>10,NA,user_friends_count),
+         ExperiencewTwitter=2020-as.numeric(stri_sub(user_created_at,from=-4L,length=4)))
+
+gm01<-ggplot(df_user_mod,aes(x=user_followers_count))+geom_histogram(binwidth = 1 , fill="firebrick3")+theme_minimal()
+gm02<-ggplot(df_user_mod,aes(x=user_friends_count))+geom_histogram(binwidth = 1,fill="firebrick4")+theme_minimal()
+grid.arrange(gm01,gm02,ncol=2)
+
+ggplot(df_user_mod,aes(x=user_friends_count, y=user_followers_count))+
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", colour="white")+
+  scale_fill_continuous(type = "viridis") +
+  theme_minimal()+ labs(title = "distribution conjointe des suiveurs et des amis", subtitle="1=10, 2=100,3=1000, 4=10 000, 5=100 000", x= "nombre d'amis que l'on suit", y=" nombre de personnes qui nous suivent")
+
+```
+### l'exprience
+
+est mesurée en nombre d'années d'abonnement à twitter
+
+
+```{r modele2}
+
+df_user_mod$ExperiencewTwitter[df_user_mod$ExperiencewTwitter>2020]<-0
+df_user_mod$ExperiencewTwitter[df_user_mod$ExperiencewTwitter<0]<-0
+df_user_mod$ExperiencewTwitter[df_user_mod$ExperiencewTwitter>12]<-0
+gm03<-ggplot(df_user_mod,aes(x=ExperiencewTwitter))+geom_histogram(binwidth = 1, fill="Royalblue4")+theme_minimal()
+gm03
+```
+
+
+### les autres éléments du tweets
+
+présence d'une image et d'urls
+```{r modele2}
+df_user$media<-as.factor(df_user$media)
+df_user$urls<-as.factor(df_user$urls)
+
+```
+
+## modèles de regression OLS
+
+On commence par le clasiique même si nous savons pertiennement qu'il n'est pas adapté, on prend cependant la précaution de retenir un modèle exponentiel (en log)
+
+```{r modele3}
+
+#library(sjPlot)
+#library(pscl)
+model01<-lm(log(favorite_count+1)~user_followers_count+user_friends_count+ExperiencewTwitter,data=df_user_mod)
+model02<-lm(log(favorite_count+1)~user_followers_count*user_friends_count+ExperiencewTwitter,data=df_user_mod)
+model03<-lm(log(favorite_count+1)~user_followers_count*user_friends_count+ExperiencewTwitter+media+urls,data=df_user_mod)
+model04<-lm(log(favorite_count+1)~user_followers_count*user_friends_count+ExperiencewTwitter+media+urls+user_followers_count*nrc_valence+user_followers_count*nrc_expressivity,data=df_user_mod)
+stargazer(model01,model02,model03,model04, title="Résults", align=TRUE,type="text",single.row=TRUE,se=NULL,style="ajs")
+```
+
+
+## Analyse des diagramme d'effets
+
+avec https://cran.r-project.org/web/packages/sjPlot/vignettes/plot_marginal_effects.html
+
+
+```{r modele4}
+
+plot_model(model04,type="pred",terms=c("user_followers_count"))+theme_minimal()
+plot_model(model04,type="pred",terms=c("user_friends_count"))+theme_minimal()
+plot_model(model04,type="pred",terms=c("user_followers_count", "user_friends_count"))+theme_minimal()
+plot_model(model04,type="pred",terms=c("ExperiencewTwitter"))+theme_minimal()
+plot_model(model04,type="pred",terms=c("user_friends_count","user_followers_count"))+theme_minimal()
+plot_model(model04,type="pred",terms=c("nrc_valence","user_followers_count"))+theme_minimal()+xlim(-50,50) +ylim(0,5)
+plot_model(model04,type="pred",terms=c("nrc_expressivity","user_followers_count"))+theme_minimal()+xlim(0,50)+ylim(0,5)
+```
+
+## modèle des retweets
+
+
+```{r modele3}
+
+#library(sjPlot)
+#library(pscl)
+model11<-lm(log(retweet_count+1)~user_followers_count+user_friends_count+ExperiencewTwitter,data=df_user_mod)
+model12<-lm(log(retweet_count+1)~user_followers_count*user_friends_count+ExperiencewTwitter,data=df_user_mod)
+model13<-lm(log(retweet_count+1)~user_followers_count*user_friends_count+ExperiencewTwitter+media+urls,data=df_user_mod)
+model14<-lm(log(retweet_count+1)~user_followers_count*user_friends_count+ExperiencewTwitter+media+urls+user_followers_count*nrc_valence+user_followers_count*nrc_expressivity,data=df_user_mod)
+stargazer(model11,model12,model13,model14, title="Résults", align=TRUE,type="text",single.row=TRUE,se=NULL,style="ajs")
+```
+
+## un modèle de comptage
+
+https://cran.r-project.org/web/packages/sjPlot/vignettes/plot_marginal_effects.html
+
+Il est plus réaliste de modéliser une variable de comptage, dans la quelle les zero qui sont la valeur modale, peuvent être inflatés. Un tweet sera aimé en fonction de son exposition, certains n'apparaissant pas 
+
+```{r modele5}
+library(stargazer)
+model21<-zeroinfl(favorite_count ~ user_followers_count+user_friends_count+ExperiencewTwitter,  dist="poisson", link="logit", data = df_user_mod)
+model22<-zeroinfl(favorite_count ~ user_followers_count*user_friends_count+ExperiencewTwitter,  dist="poisson", link="logit", data = df_user_mod)
+model23<-zeroinfl(favorite_count ~ user_followers_count*user_friends_count+ExperiencewTwitter+media+urls,  dist="poisson", link="logit", data = df_user_mod)
+model24<-zeroinfl(favorite_count ~ user_followers_count*user_friends_count+ExperiencewTwitter+media+urls+user_followers_count*nrc_valence+user_followers_count*nrc_expressivity,  dist="poisson", link="logit", data = df_user_mod)
+
+stargazer(model21,model22,model23,model24, title="Résults", align=TRUE,type="text",single.row=TRUE,se=NULL,style="ajs")
+
+```
+
+
+```{r modele4}
+
+plot_model(model24,type="pred",terms=c("user_followers_count"))+theme_minimal()
+plot_model(model24,type="pred",terms=c("user_friends_count"))+theme_minimal()
+plot_model(model24,type="pred",terms=c("user_followers_count", "user_friends_count"))+theme_minimal()
+plot_model(model24,type="pred",terms=c("ExperiencewTwitter"))+theme_minimal()
+plot_model(model24,type="pred",terms=c("user_friends_count","user_followers_count"))+theme_minimal()
+plot_model(model24,type="pred",terms=c("nrc_valence","user_followers_count"))+theme_minimal()+xlim(-50,50) +ylim(0,15)
+plot_model(model24,type="pred",terms=c("nrc_expressivity","user_followers_count"))+theme_minimal()+xlim(0,50)+ylim(0,10)
+```
+
+## le modèle des retweetes
+
+
+```{r modele5}
+library(stargazer)
+model03<-zeroinfl(retweet_count ~ user_followers_count+user_friends_count+ExperiencewTwitter,  dist="poisson", link="logit", data = df_user_mod)
+model13<-zeroinfl(retweet_count ~ user_followers_count*user_friends_count+ExperiencewTwitter,  dist="poisson", link="logit", data = df_user_mod)
+model23<-zeroinfl(retweet_count ~ user_followers_count*user_friends_count+ExperiencewTwitter+media+urls,  dist="poisson", link="logit", data = df_user_mod)
+model33<-zeroinfl(retweet_count ~ user_followers_count*user_friends_count+ExperiencewTwitter+media+urls+user_followers_count*positive*negative,  dist="poisson", link="logit", data = df_user_mod)
+
+stargazer(model03,model13,model23,model33, title="Résults", align=TRUE,type="text",single.row=TRUE,se=NULL,style="ajs")
+
+```
+
+On retient le modèle le plus complet qui est dépit de la significativité des coefficient ne semble pas produire un meilleur ajustement. Le sentiment compte peu au regard des retweets. Mais il permet une expérience de pensée plus sophistitiquée. 
+
+### interaction follover in
+
+```{r modele6}
+gm10<-plot_model(model33,type="pred",terms=c("user_followers_count","user_friends_count"))+theme_minimal()
+gm11<-plot_model(model33,type="pred",terms=c("user_friends_count","user_followers_count")) +theme_minimal()
+
+grid.arrange(gm10,gm11, ncol=2)
+```
+
+ON examine ici les interaction d'ordre 3. Quel est l'impact de la positivité  en fonction des niveaux de négativité mais aussi du nombre de follower ? Et en complément l'impact de la négativitité sur le nombre de favorite en fonction de la positivité et du nombre de followers. On ne poursuit pas suit les friends qui ont un rôle secondaire.
+
+```{r modele7}
+
+plot_model(model33,type="pred",terms=c("positive", "negative","user_followers_count"))+theme_minimal()
+plot_model(model33,type="pred",terms=c( "negative","positive","user_followers_count"))+theme_minimal()
+
+```
+# MTMM
+
+
+
+#correlation
+
+
+```{r modele7}
+df_sem<- df_user %>% select(nrc_positif,nrc_negatif,liwc_positif, liwc_negatif,lsdfr_positif,lsdfr_negatif, Twittos,month) %>% mutate(nrc_positif=log(nrc_positif+1),nrc_negatif=log(nrc_negatif+1),liwc_positif=log(liwc_positif+1), liwc_negatif=log(liwc_negatif+1),lsdfr_positif=log(lsdfr_positif+1),lsdfr_negatif=log(lsdfr_negatif+1))
+
+df_sem<-na.omit(df_sem)
+
+ #cor(df_sem)
+library(lavaan)
+
+
+model<-'
+#traits
+Positif =~ nrc_positif+liwc_positif+lsdfr_positif
+Negatif =~ nrc_negatif+liwc_negatif+lsdfr_negatif
+Positif~~Negatif
+Positif~~1*Positif
+Negatif~~1*Negatif
+
+#method
+NRC   =~1*nrc_positif+1*nrc_negatif
+LIWC  =~1*liwc_positif+1*liwc_negatif
+LSDFR =~1*lsdfr_positif+1*lsdfr_negatif
+NRC~~1*NRC
+LIWC~~1*LIWC
+
+'
+fit <- sem(model, df_sem)
+fit_g <- sem(model, df_sem, group="Twittos")
+fit_t <- sem(model, df_sem, group="month")
+
+summary(fit,standardized = TRUE)
+#parameterEstimates(fit)
+fitMeasures(fit, c("cfi","rmsea", "chisq","npar","aic","bic"))
+fitMeasures(fit_g, c("cfi","rmsea", "chisq","npar","aic","bic"))
+fitMeasures(fit_t, c("cfi","rmsea", "chisq","npar","aic","bic"))
+
+
+library(semTools)
+measurementInvariance(model=model, data = df_sem, group = "Twittos")
+measurementInvariance(model=model, data = df_sem, group = "month")
+library(semPlot)
+groups <- list(group1 = 1:6,
+               group2 = 7:8,
+               group3 = 9:11)
+m = matrix(nrow = 3, ncol = 6)
+m[1, ] = c(0, 7, 0, 8, 0, 0)
+m[2, ] = 1:6
+m[3, ] = c(0, 0, 10,0, 11, 0)
+
+
+n = matrix(nrow = 6, ncol = 3)
+n[,1 ] = c(0, 7, 0, 0, 8, 0)
+n[,2 ] = c(1, 2, 3, 4, 5, 6)
+n[,3 ] = c(9, 0, 10,0, 11, 0)
+n
+
+semPaths(fit, title = TRUE,layout=n,
+         groups=groups, color = c("#fff8dc", "#58B5BC", "#F5651C"),
+         curvePivot = TRUE,
+         what = "std",
+         rotation = 1,
+         optimizeLatRes = TRUE,
+         intercepts = FALSE,
+         edge.label.cex = 0.95,
+         exoVar=FALSE,
+         sizeMan=6,
+         sizeLat=8,
+         nCharNodes=6,
+         residuals=FALSE,
+         fixedStyle = 1,
+         freeStyle=1,fade=FALSE)
+
+```
+NRC   =~nrc_positif+nrc_negatif
+LIWC  =~liwc_positif+nrc_negatif
+LSDFR =~lsdfr_positif+lsdfr_negatif
+NRC
+
+Dans ce modèle chaque mesure d'un trait revient au modèle xik = li*Ti+Mk autrement dit l'effet de méthode est un 
+```{r modele7}
+df_sem<- df_user%>%filter(n_word>4) %>% select(nrc_positif,nrc_negatif,liwc_positif, liwc_negatif,lsdfr_positif,lsdfr_negatif, Twittos,month) %>% 
+  mutate(nrc_positif=log(nrc_positif+1),
+         nrc_negatif=log(nrc_negatif+1),liwc_positif=log(liwc_positif+1), liwc_negatif=log(liwc_negatif+1),lsdfr_positif=log(lsdfr_positif+1),
+         lsdfr_negatif=log(lsdfr_negatif+1),M1=1,M2=1,M3=1)
+
+df_sem<-na.omit(df_sem)
+
+ #cor(df_sem)
+library(lavaan)
+
+
+model<-'
+
+
+#traits
+Positif =~ 1*nrc_positif+liwc_positif+lsdfr_positif
+Negatif =~ 1*nrc_negatif+liwc_negatif+lsdfr_negatif
+Positif~~Negatif
+Positif~~1*Positif
+Negatif~~1*Negatif
+
+#method
+NRC   =~1*nrc_positif+1*nrc_negatif
+LIWC  =~1*liwc_positif+1*liwc_negatif
+LSDFR =~1*lsdfr_positif+1*lsdfr_negatif
+NRC~~1*NRC
+LIWC~~1*LIWC
+LSDFR~~1*LSDFR
+
+'
+fit <- sem(model, df_sem, estimator="ML")
+
+summary(fit,standardized = TRUE)
+#parameterEstimates(fit)
+fitMeasures(fit, c("cfi","rmsea", "chisq","npar","aic","bic"))
+std_ts <- standardizedsolution(fit) %>% filter(op == "=~") %>% select(1:4)
+std_ts
+std_basic <- standardizedsolution(fit) %>%
+filter(op == "=~") %>% select(1:4)
+std_basic
+
+##
+library(semPlot)
+groups <- list(group1 = 1:6,
+               group2 = 7:8,
+               group3 = 9:11)
+m = matrix(nrow = 3, ncol = 6)
+m[1, ] = c(0, 7, 0, 8, 0, 0)
+m[2, ] = 1:6
+m[3, ] = c(0, 0, 10,0, 11, 0)
+
+
+n = matrix(nrow = 6, ncol = 3)
+n[,1 ] = c(0, 7, 0, 0, 8, 0)
+n[,2 ] = c(1, 2, 3, 4, 5, 6)
+n[,3 ] = c(9, 0, 10,0, 11, 0)
+n
+
+semPaths(fit, title = TRUE,layout=n,
+         groups=groups, color = c("#fff8dc", "#58B5BC", "#F5651C"),
+         curvePivot = TRUE,
+         what = "std",
+         rotation = 1,
+         optimizeLatRes = TRUE,
+         intercepts = FALSE,
+         edge.label.cex = 0.95,
+         exoVar=FALSE,
+         sizeMan=6,
+         sizeLat=8,
+         nCharNodes=6,
+         residuals=FALSE,
+         fixedStyle = 1,
+         freeStyle=1,fade=FALSE)
+
+
+```
+
+# Références :
